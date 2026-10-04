@@ -8,13 +8,13 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { createMockCtx } from './painters/test-utils.js'
 import { createGrid } from './index.js'
 
-function mount(opts = {}) {
+function mount(host = {}) {
   const parent = document.createElement('div')
   const canvas = document.createElement('canvas')
   vi.spyOn(canvas, 'getContext').mockReturnValue(createMockCtx())
   parent.appendChild(canvas)
   document.body.appendChild(parent)
-  const grid = createGrid(canvas, { getFormat: () => ({}), canEdit: () => true, ...opts })
+  const grid = createGrid(canvas, { cells: { getStyle: () => ({}) }, host: { canEdit: () => true, ...host } })
   grid.resize(800, 600)
   const editor = () => parent.querySelector('textarea') as HTMLTextAreaElement | null
   const press = (key: string, init: KeyboardEventInit = {}) => {

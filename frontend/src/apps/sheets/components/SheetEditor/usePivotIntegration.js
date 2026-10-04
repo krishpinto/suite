@@ -1,7 +1,7 @@
 import { ref, computed, watch } from 'vue'
 import { computePivotModel, computePivotModelAsync, pivotDrillDown, writePivotToSheet } from '../../engine/pivot.js'
 import { colLabel, cellId, parseCellId } from '../../utils/cells.js'
-import { COL_HEADER_H, ROW_HEADER_W } from '../../canvas/constants.js'
+import { COL_HEADER_H, ROW_HEADER_W } from '../../canvas/constants'
 import { overlayRectStyle } from '../../utils/overlay-rect.js'
 
 // Styling applied to the pivot's column header row (row 0) and Grand Total

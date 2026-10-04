@@ -1,6 +1,6 @@
 import { computed, ref } from 'vue'
 import { DEFAULT_CHART_SIZE } from '../../engine/charts.js'
-import { COL_HEADER_H, DEFAULT_ROW_H } from '../../canvas/constants.js'
+import { COL_HEADER_H, DEFAULT_ROW_H } from '../../canvas/constants'
 import { parseCellId } from '../../utils/cells.js'
 
 /**
