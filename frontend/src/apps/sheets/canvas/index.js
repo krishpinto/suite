@@ -10,7 +10,7 @@ import { isWrapText, getTextWrap, wrapLines, lineHeightFor } from '../utils/text
 import { chipFont } from './chip-geometry.js'
 import { checkboxRect } from './checkbox-geometry.js'
 
-export function createGrid(canvas, { onSelect, onCommit, onInput, onCancel, getFormat, onFill, onBatchCommit, getMergeInfo, isSlave, getMasterId, getComment, getValidation, getCondFormat, getSparkline, getRightInset, onHyperlinkClick, onLinkHover, onDropdownClick, onCheckboxToggle, onPivotDrill, onResizeEnd, onColMove, getSheetNames, getCurrentSheet, getEditingHomeSheet, getDisplay, getCellIds, lazyValues = false, canEdit = () => true, isCellEditable, onBlockedEdit } = {}) {
+export function createGrid(canvas, { onSelect, onCommit, onInput, onCancel, getFormat, onFill, onBatchCommit, getMergeInfo, isSlave, getMasterId, getComment, getValidation, getCondFormat, getSparkline, getRightInset, onHyperlinkClick, onLinkHover, onDropdownClick, onCheckboxToggle, onPivotDrill, onResizeEnd, onColMove, getSheetNames, getCurrentSheet, getEditingHomeSheet, getDisplay, getCellIds, getEditValue, lazyValues = false, canEdit = () => true, isCellEditable, onBlockedEdit } = {}) {
   const ctx = canvas.getContext('2d')
   const dpr = window.devicePixelRatio || 1
 
@@ -33,6 +33,14 @@ export function createGrid(canvas, { onSelect, onCommit, onInput, onCancel, getF
   const getValue = id => _lazyValues ? getDisplay(id) : data[id]
   const hasVal   = id => !!getValue(id)
   const cellIds  = () => _lazyValues ? (getCellIds ? getCellIds() : []) : Object.keys(data)
+  // What the in-cell editor opens with: the cell's input (a formula keeps
+  // its `=…` text), not its display. Seeding the editor with the display
+  // and committing on blur would overwrite a formula with its result.
+  // Hosts without getEditValue keep the display, as before.
+  const editValue = id => {
+    const v = getEditValue ? getEditValue(id) : getValue(id)
+    return v == null ? '' : String(v)
+  }
   function setLazyValues(on) { _lazyValues = !!on && typeof getDisplay === 'function'; render() }
   function isLazyValues() { return _lazyValues }
   const colW = {}
@@ -1381,7 +1389,7 @@ export function createGrid(canvas, { onSelect, onCommit, onInput, onCancel, getF
     // instead of editing the (regenerated) cell. The handler returns true
     // when it took over.
     if (onPivotDrill?.(h.r, h.c)) return
-    showEditor(getValue(cellId(h.r, h.c)) ?? '', 'edit')
+    showEditor(editValue(cellId(h.r, h.c)), 'edit')
   })
 
   let _lastLinkHover = null   // 'r,c' of the linked cell the pointer is on
@@ -1650,7 +1658,7 @@ export function createGrid(canvas, { onSelect, onCommit, onInput, onCancel, getF
       return
     }
 
-    if (e.key === 'F2') { e.preventDefault(); showEditor(getValue(cellId(r, c)) ?? '', 'edit'); return }
+    if (e.key === 'F2') { e.preventDefault(); showEditor(editValue(cellId(r, c)), 'edit'); return }
 
     if ((e.key === 'Delete' || e.key === 'Backspace') && !mod) {
       e.preventDefault()
@@ -1735,7 +1743,7 @@ export function createGrid(canvas, { onSelect, onCommit, onInput, onCancel, getF
       const { r0, c0, r1, c1 } = getSelRange()
       const singleCell = r0 === r1 && c0 === c1
       if (singleCell && !e.shiftKey && !mod && !e.altKey && canEdit()) {
-        showEditor(getValue(cellId(r, c)) ?? '', 'edit')
+        showEditor(editValue(cellId(r, c)), 'edit')
         return
       }
       const anchorC = _tabAnchorCol ?? c
