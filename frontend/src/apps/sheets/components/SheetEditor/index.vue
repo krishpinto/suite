@@ -1257,7 +1257,7 @@
 <script setup>
 import { h, ref, reactive, computed, customRef, watch, nextTick, onMounted, onBeforeUnmount, onScopeDispose } from 'vue'
 import { useMediaQuery } from '@vueuse/core'
-import { createGrid }          from '../../canvas/index.js'
+import { createGrid }          from '../../canvas/index'
 import { COL_HEADER_H, ROW_HEADER_W } from '../../canvas/constants.js'
 import { colLabel, parseCellId, cellId } from '../../utils/cells.js'
 import { call } from '../../utils/api.js'
