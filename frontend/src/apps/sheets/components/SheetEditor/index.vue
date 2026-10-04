@@ -3247,6 +3247,7 @@ function _setupGridInstance() {
 
       const before = sheet.getCell(id, writeSheet)
       sheet.setCell(id, value, writeSheet)
+      _ironcalcMirrorInput(id, value, writeSheet)
       if (writeSheet !== sheet.getCurrentSheet()) {
         switchSheet(writeSheet, { preserveEdit: true })
       }
@@ -3300,6 +3301,9 @@ function _setupGridInstance() {
     // (grid.setLazyValues(true)), the grid pulls this per visible cell instead
     // of materialising every cell up front.
     getDisplay:   _cellDisplay,
+    // The in-cell editor opens with the raw input (the formula, not its
+    // result), matching the formula bar set in onSelect.
+    getEditValue: id => sheet.getCell(id),
     // Non-empty cell ids for the current sheet — the lazy path's source for
     // cold-path scans (Cmd+A extent, autofit) that used to walk the grid's
     // own `data` keys.
@@ -3486,6 +3490,9 @@ onMounted(async () => {
   } finally {
     isInitialLoad.value = false
   }
+  if (_ironcalcEnabled() && grid?.isLazyValues?.()) {
+    try { await _startIronCalc() } catch (e) { console.error('[sheets] IronCalc preview failed to start', e) }
+  }
   // Focus the grid on open so arrow-key nav and Cmd+V work immediately, without
   // a priming click. Idle-guarded so a load that opened a dialog keeps its focus.
   _refocusGridIfIdle()
@@ -3503,6 +3510,9 @@ onBeforeUnmount(() => {
   }
   gridWrapRef.value?.removeEventListener('scroll', _pinGridWrapScroll)
   ro?.disconnect()
+  _ironcalc?.provider.dispose()
+  _ironcalc?.client.terminate()
+  _ironcalc = null
   grid?.destroy()
   window.removeEventListener('keydown', onGlobalKey)
   document.removeEventListener('paste',     onDocPaste)
@@ -5938,8 +5948,71 @@ function _cellDisplay(id) {
   if (showFormulas.value) return String(sheet.getCell(id) ?? '')
   const sn  = sheet.getCurrentSheet()
   const fmt = formats.get(id, sn)
-  const dv  = sheet.getDisplayValue(id)
+  const dv  = _ironcalc ? _ironcalcDisplay(id, sn) : sheet.getDisplayValue(id)
   return fmt.numberFormat ? applyNumberFmt(dv, fmt.numberFormat) : dv
+}
+
+// ── IronCalc preview (?engine=ironcalc) ──────────────────────────────────────
+// Runs the new core (core/: worker, client, display cache) beside the old
+// engine. The grid's lazy getDisplay reads values from IronCalc; the old
+// engine still owns saving, undo and every feature layer. Only single-cell
+// commits are mirrored, so paste, fill and row/column edits diverge until
+// editing moves to commands. Needs the lazy render path (the default).
+
+let _ironcalc = null // { client, provider } once started
+
+function _ironcalcEnabled() {
+  try {
+    return new URLSearchParams(window.location.search).get('engine') === 'ironcalc'
+  } catch { return false }
+}
+
+async function _startIronCalc() {
+  // Dynamic imports: without the flag, none of the core is downloaded.
+  const [{ createWorkbookClient }, { createDisplayCache }, { createCellProvider }, { importV1 }] = await Promise.all([
+    import('../../core/client'),
+    import('../../core/display-cache'),
+    import('../../core/cell-provider'),
+    import('../../core/import-v1'),
+  ])
+  const cache  = createDisplayCache()
+  const client = await createWorkbookClient({ echo: cache })
+  client.onCommandError(f => console.error('[sheets] IronCalc rejected', f.command.type, f.error))
+
+  const t0 = performance.now()
+  const names = sheet.getSheetNames()
+  const { command, skipped } = importV1(names.map(name => ({ name, cells: sheet.getRawData(name) })))
+  client.dispatch(command)
+  await client.idle()
+  console.info(`[sheets] IronCalc loaded ${command.payload.commands.length} commands in ${Math.round(performance.now() - t0)} ms`)
+  if (Object.keys(skipped).length) console.warn('[sheets] IronCalc skipped cells', skipped)
+
+  const provider = createCellProvider({ client, cache, requestRender: () => grid?.render?.() })
+  _ironcalc = { client, provider }
+  grid?.render?.()
+}
+
+let _ironcalcSeq = 0
+
+function _ironcalcMirrorInput(id, value, sn) {
+  if (!_ironcalc) return
+  const p = parseCellId(id)
+  if (!p) return
+  const row = p.row + 1, col = p.col + 1
+  const input = value == null ? '' : String(value)
+  _ironcalc.client.dispatch({
+    id: `ui-${Date.now()}-${_ironcalcSeq++}`,
+    actor: 'local',
+    ts: Date.now(),
+    ...(input === ''
+      ? { type: 'clearContents', payload: { sheet: sn, range: { r1: row, c1: col, r2: row, c2: col } } }
+      : { type: 'setInput', payload: { sheet: sn, row, col, input } }),
+  })
+}
+
+function _ironcalcDisplay(id, sn) {
+  const p = parseCellId(id)
+  return p ? _ironcalc.provider.getDisplay(sn, p.row + 1, p.col + 1) : ''
 }
 
 // Grow the grid's scrollable area to cover a sheet's used extent so the user
