@@ -29,6 +29,9 @@
 				/>
 
 				<div class="flex-1 overflow-y-auto overflow-x-hidden px-2">
+					<SidebarSection>
+						<CommandPaletteSidebarItem />
+					</SidebarSection>
 					<SidebarSection
 						v-for="section in sidebarItems"
 						:key="section.key ?? section.label"
@@ -42,7 +45,14 @@
 							:key="item.label"
 								:label="item.label"
 								:icon="item.icon"
-								:to="item.to"
+								:route="item.to"
+								:class="
+									threadDrag.overMailbox.value === item.mailboxId &&
+									'ring-2 ring-outline-gray-3 ring-inset'
+								"
+								@dragover="onFolderDragOver($event, item)"
+								@dragleave="onFolderDragLeave(item)"
+								@drop="onFolderDrop($event, item)"
 								:active="
 									item.activeFor?.includes(
 										['mail-mailbox', 'mail-mail'].includes(route.name as string)
@@ -92,24 +102,8 @@
 		</Sidebar>
 	</Transition>
 
-	<SettingsModal v-if="!isMobile" v-model="showSettings" />
-	<!-- Mobile settings pushes in from the right like a thread: its back-chevron
-	     header is push-navigation language (slide-up is reserved for summoned
-	     tasks — compose/search). Teleported to body: inside the layout's isolate
-	     stacking context the tab bar/FAB would paint over it. -->
-	<Teleport v-else to="body">
-		<Transition
-			enter-active-class="transition-transform duration-300 ease-[cubic-bezier(0.32,0.72,0,1)]"
-			enter-from-class="translate-x-full"
-			leave-active-class="transition-transform duration-300 ease-[cubic-bezier(0.32,0.72,0,1)]"
-			leave-to-class="translate-x-full"
-		>
-			<PWASettings v-if="showSettings" @close="showSettings = false" />
-		</Transition>
-	</Teleport>
 	<FolderModal v-model="showFolderModal" :mailbox="selectedMailbox" />
 	<DeleteFolderModal v-model="showDeleteMailbox" :mailbox="selectedMailbox" />
-	<ShortcutsModal v-model="showShortcuts" />
 </template>
 
 <script setup lang="ts">
@@ -117,9 +111,8 @@ import { computed, h, inject, onMounted, onUnmounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useStorage } from '@vueuse/core'
 import { Icon } from 'frappe-ui/experimental'
-import { Check, Keyboard, User } from 'lucide-vue-next'
+import { Keyboard, User } from 'lucide-vue-next'
 import {
-	Avatar,
 	Button,
 	Dropdown,
 	Sidebar,
@@ -129,51 +122,44 @@ import {
 	SidebarSection,
 } from 'frappe-ui'
 
+import { accountSubmenu } from '@/composables/accountSubmenu'
 import { useAppSwitcher } from '@/composables/useAppSwitcher'
 import { FOLDER_ICON_COLOR_MAP } from '@/apps/mail/constants'
 import { getIcon, getMailboxName, toTitleCase } from '@/apps/mail/utils'
-import { useAccountSwitch, useScreenSize, useSettings, useSidebar } from '@/apps/mail/utils/composables'
+import { canMoveToMailbox } from '@/apps/mail/utils/mailboxTargets'
+import { useAccountSwitch, useScreenSize, useSettings, useShortcuts, useSidebar } from '@/apps/mail/utils/composables'
+import { useThreadDrag } from '@/apps/mail/composables/useThreadDrag'
 import { sessionStore } from '@/apps/mail/stores/session'
 import { SECONDARY_MAILBOX_ROLES, userStore } from '@/apps/mail/stores/user'
 import MailLogo from '@/apps/mail/components/Icons/MailLogo.vue'
 import DeleteFolderModal from '@/apps/mail/components/Modals/DeleteFolderModal.vue'
 import FolderModal from '@/apps/mail/components/Modals/FolderModal.vue'
-import SettingsModal from '@/apps/mail/components/Modals/SettingsModal.vue'
-import ShortcutsModal from '@/apps/mail/components/Modals/ShortcutsModal.vue'
-import PWASettings from '@/apps/mail/components/PWASettings.vue'
 import QuotaBar from '@/apps/mail/components/QuotaBar.vue'
 import UpcomingEvents from '@/apps/mail/components/UpcomingEvents.vue'
+import CommandPaletteSidebarItem from '@/shell/CommandPaletteSidebarItem.vue'
 
 import type { MailboxData } from '@/apps/mail/types'
 
 import ArrowLeft from '~icons/lucide/arrow-left'
 import BookUser from '~icons/lucide/book-user'
 import CalendarClock from '~icons/lucide/calendar-clock'
-import Clock from '~icons/lucide/clock'
 import ContactRound from '~icons/lucide/contact-round'
 import Crown from '~icons/lucide/crown'
 import Ellipsis from '~icons/lucide/ellipsis'
-import Flag from '~icons/lucide/flag'
 import Globe from '~icons/lucide/globe'
 import House from '~icons/lucide/house'
-import KeyRound from '~icons/lucide/key-round'
 import Lock from '~icons/lucide/lock'
 import LogOut from '~icons/lucide/log-out'
 import Mailbox from '~icons/lucide/mailbox'
 import Mails from '~icons/lucide/mails'
 import Megaphone from '~icons/lucide/megaphone'
 import Plus from '~icons/lucide/plus'
-import Radar from '~icons/lucide/radar'
-import ScrollText from '~icons/lucide/scroll-text'
 import Settings from '~icons/lucide/settings'
-import Shield from '~icons/lucide/shield'
 import ShieldCheck from '~icons/lucide/shield-check'
-import Signature from '~icons/lucide/signature'
 import Star from '~icons/lucide/star'
 import Trash2 from '~icons/lucide/trash-2'
 import Users from '~icons/lucide/users'
 import UsersRound from '~icons/lucide/users-round'
-import Wrench from '~icons/lucide/wrench'
 
 const route = useRoute()
 const router = useRouter()
@@ -198,6 +184,42 @@ const { logout, branding } = sessionStore()
 const store = userStore()
 const { mailboxes, allInboxesUnread } = store
 
+// ── Threads dropped onto a folder ─────────────────────────────────────────────────────────────────
+// The rows are dragged in the view; the folders that take them are here. The move itself belongs to
+// the view too — the sidebar only says which folder the cursor is over, and hands the drop back.
+const threadDrag = useThreadDrag()
+
+/**
+ * Folders that can take a drop: exactly the ones the "Move to" menu offers, read from the same
+ * predicate — and from the same membership, which the drag carries over from the list — so the two
+ * lists cannot drift. That rules out the folders the dragged threads are already in, along with
+ * Sent, Drafts and the Screener; Junk and Trash stay in, since handleMoveThreads reads those as
+ * "mark as spam" and "delete", which is what dropping there means. Sidebar entries that are not
+ * real mailboxes — Starred, All Inboxes, Outbox — have no id and fall out on their own.
+ */
+const canDrop = (item: { mailboxId?: string }) =>
+	threadDrag.isDragging.value &&
+	!!mailboxes.data?.some((m: MailboxData) => m.id === item.mailboxId) &&
+	canMoveToMailbox(item.mailboxId, threadDrag.filedIn.value, store.mailboxIds)
+
+const onFolderDragOver = (e: DragEvent, item: { mailboxId?: string }) => {
+	if (!canDrop(item)) return
+	// Without preventDefault the browser refuses the drop and shows the "no" cursor.
+	e.preventDefault()
+	if (e.dataTransfer) e.dataTransfer.dropEffect = 'move'
+	threadDrag.overMailbox.value = item.mailboxId!
+}
+
+const onFolderDragLeave = (item: { mailboxId?: string }) => {
+	if (threadDrag.overMailbox.value === item.mailboxId) threadDrag.overMailbox.value = ''
+}
+
+const onFolderDrop = (e: DragEvent, item: { mailboxId?: string }) => {
+	if (!canDrop(item)) return
+	e.preventDefault()
+	threadDrag.drop(item.mailboxId!)
+}
+
 const user = inject('$user')
 
 const appsMenuOption = useAppSwitcher('mail')
@@ -206,7 +228,7 @@ const { showSettings } = useSettings()
 const showFolderModal = ref(false)
 const selectedMailbox = ref()
 const showDeleteMailbox = ref(false)
-const showShortcuts = ref(false)
+const { openShortcuts } = useShortcuts()
 
 const title = computed(() =>
 	branding.data?.brand_name && branding.data?.brand_name != 'Frappe'
@@ -261,6 +283,7 @@ const menuItems = computed(() => [
 				condition: () =>
 					user.data.is_jmap_configured &&
 					user.data.is_suite_admin &&
+					user.data.is_suite_cloud_configured &&
 					!route.meta.isDashboard &&
 					!isMobile.value,
 			},
@@ -277,7 +300,7 @@ const menuItems = computed(() => [
 			{
 				icon: Keyboard,
 				label: __('Shortcuts'),
-				onClick: () => (showShortcuts.value = true),
+				onClick: openShortcuts,
 				condition: () => !isMobile.value,
 			},
 		],
@@ -288,25 +311,7 @@ const menuItems = computed(() => [
 			{
 				icon: User,
 				label: __('Accounts'),
-				submenu: user.data.accounts.map?.((a) => ({
-					label: a._name,
-					onClick: () => switchAccount(a.id),
-					slots: {
-						item: () =>
-							h(
-								'div',
-								{
-									class: 'flex items-center gap-2 p-1.5 rounded-4 hover:bg-surface-gray-2 cursor-pointer w-48 shrink-0',
-								},
-								[
-									h(Avatar, { label: a._name, size: 'md' }),
-									h('span', { class: 'text-sm w-full truncate' }, a._name),
-									a.id === store.accountId &&
-										h(Check, { label: a._name, class: 'shrink-0 icon' }),
-								],
-							),
-					},
-				})),
+				submenu: accountSubmenu(user.data.accounts, store.accountId, switchAccount),
 				condition: () => user.data.accounts?.length > 1 && !route.meta.isDashboard,
 			},
 			{
@@ -323,10 +328,10 @@ const dashboardItems = [
 		label: __('Directory'),
 		items: [
 			{
-				label: __('Members'),
+				label: __('Accounts'),
 				icon: Users,
-				to: { name: 'mail-members' },
-				activeFor: ['mail-members', 'mail-invites', 'mail-member'],
+				to: { name: 'mail-accounts' },
+				activeFor: ['mail-accounts', 'mail-invites', 'mail-account'],
 			},
 			{
 				label: __('Groups'),
@@ -340,18 +345,6 @@ const dashboardItems = [
 				to: { name: 'mail-mailing-lists' },
 				activeFor: ['mail-mailing-lists', 'mail-mailing-list'],
 			},
-			{
-				label: __('Roles'),
-				icon: Shield,
-				to: { name: 'mail-roles' },
-				activeFor: ['mail-roles', 'mail-role'],
-			},
-			{
-				label: __('OAuth Clients'),
-				icon: KeyRound,
-				to: { name: 'mail-oauth-clients' },
-				activeFor: ['mail-oauth-clients', 'mail-oauth-client'],
-			},
 		],
 	},
 	{
@@ -364,86 +357,16 @@ const dashboardItems = [
 				activeFor: ['mail-domains', 'mail-domain'],
 			},
 			{
-				label: __('DKIM Signatures'),
-				icon: Signature,
-				to: { name: 'mail-dkim-signatures' },
-				activeFor: ['mail-dkim-signatures', 'mail-dkim-signature'],
-			},
-		],
-	},
-	{
-		label: __('Emails'),
-		items: [
-			{
-				label: __('Queued'),
-				icon: Clock,
-				to: { name: 'mail-queued-messages' },
-				activeFor: ['mail-queued-messages', 'mail-queued-message'],
-			},
-			{
-				label: __('Delivery Test'),
-				icon: Radar,
-				to: { name: 'mail-delivery-test' },
-				activeFor: ['mail-delivery-test'],
-			},
-		],
-	},
-	{
-		label: __('Inbound Reports'),
-		items: [
-			{
-				label: __('DMARC'),
+				label: __('DMARC Reports'),
 				icon: ShieldCheck,
-				to: { name: 'mail-reports-dmarc-inbound' },
-				activeFor: ['mail-reports-dmarc-inbound'],
+				to: { name: 'mail-dmarc-reports' },
+				activeFor: ['mail-dmarc-reports', 'mail-dmarc-report'],
 			},
 			{
-				label: __('TLS'),
+				label: __('TLS Reports'),
 				icon: Lock,
-				to: { name: 'mail-reports-tls-inbound' },
-				activeFor: ['mail-reports-tls-inbound'],
-			},
-			{
-				label: __('ARF'),
-				icon: Flag,
-				to: { name: 'mail-reports-arf-inbound' },
-				activeFor: ['mail-reports-arf-inbound'],
-			},
-		],
-	},
-	{
-		label: __('Outbound Reports'),
-		items: [
-			{
-				label: __('DMARC'),
-				icon: ShieldCheck,
-				to: { name: 'mail-reports-dmarc-outbound' },
-				activeFor: ['mail-reports-dmarc-outbound'],
-			},
-			{
-				label: __('TLS'),
-				icon: Lock,
-				to: { name: 'mail-reports-tls-outbound' },
-				activeFor: ['mail-reports-tls-outbound'],
-			},
-		],
-	},
-	// Logs and Actions each held a group of one whose label repeated the item;
-	// a single System group keeps the nav shorter without losing meaning.
-	{
-		label: __('System'),
-		items: [
-			{
-				label: __('Logs'),
-				icon: ScrollText,
-				to: { name: 'mail-logs' },
-				activeFor: ['mail-logs', 'mail-log'],
-			},
-			{
-				label: __('Actions'),
-				icon: Wrench,
-				to: { name: 'mail-actions' },
-				activeFor: ['mail-actions'],
+				to: { name: 'mail-tls-reports' },
+				activeFor: ['mail-tls-reports', 'mail-tls-report'],
 			},
 		],
 	},
@@ -452,7 +375,12 @@ const dashboardItems = [
 const mailboxItems = computed(
 	() =>
 		mailboxes.data
-			?.filter((mailbox: MailboxData) => mailbox.subscribed)
+			// The Screener is listed even unsubscribed: it can't be hidden from Folder settings, and
+			// Stalwart recreates it unsubscribed when the screening Sieve script brings it back.
+			?.filter(
+				(mailbox: MailboxData) =>
+					mailbox.subscribed || mailbox.id === store.mailboxIds.screener,
+			)
 			?.map((mailbox: MailboxData) => {
 				// The Screening folder opens the dedicated Screener page, not the thread list.
 				const isScreener = mailbox.id === store.mailboxIds.screener

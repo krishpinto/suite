@@ -11,6 +11,8 @@ import { userStore } from '@/apps/calendar/stores/user'
 
 const UTC_FORMAT = 'YYYY-MM-DDTHH:mm:ss[Z]'
 
+type Dayjs = ReturnType<typeof dayjs>
+
 /**
  * The zone timestamps are displayed and typed in: the browser's, falling back to `time_zone` on
  * the User doc for the rare environment where the browser cannot say (`get_user_info` resolves
@@ -51,3 +53,34 @@ export const utcDayStart = (date?: string | null): string =>
 /** The end of a `YYYY-MM-DD` day in the user's zone, as a UTC timestamp the APIs take. */
 export const utcDayEnd = (date?: string | null): string =>
 	date ? dayjs.tz(date, userTimeZone()).endOf('day').utc().format(UTC_FORMAT) : ''
+
+const WALL_FORMAT = 'YYYY-MM-DD[T]HH:mm:ss'
+
+/**
+ * The clock face a moment shows, read back as UTC. Two of these subtract to the difference a
+ * reader would count off a calendar — which is not the time that elapsed between them whenever a
+ * DST boundary sits in between.
+ */
+const asWallClock = (moment: Dayjs) => dayjs.utc(moment.format(WALL_FORMAT))
+
+/**
+ * Where a recurring series' anchor lands when the reader edits the time on one of its occurrences
+ * and saves the whole series.
+ *
+ * The form is showing one occurrence, so its start is that occurrence's — sending it as the
+ * master's would drag the anchor onto this week and re-base every date after it. What carries over
+ * is the difference the reader made, applied to the master's own start: no edit moves nothing, and
+ * an edit moves the series by exactly what they changed, as every other calendar does.
+ *
+ * Both halves of that are wall-clock work, and neither can be done on instants. The difference is
+ * what the reader typed against what they were shown — move an occurrence across the day the
+ * clocks change and an hour of elapsed time appears that nobody asked for. The master is a
+ * JSCalendar `start`: a clock face with no offset, kept in the master's own zone, so adding to it
+ * in the browser's zone would find a second boundary to trip over. Hence UTC on both sides, where
+ * an hour is always an hour.
+ */
+export const shiftedMasterStart = (masterStart: string, opened: Dayjs, edited: Dayjs): string =>
+	dayjs
+		.utc(masterStart)
+		.add(asWallClock(edited).diff(asWallClock(opened), 'minute'), 'minute')
+		.format(WALL_FORMAT)

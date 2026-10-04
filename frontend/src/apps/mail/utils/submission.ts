@@ -140,21 +140,20 @@ export const deliveryErrorTitle = (row: Submission) =>
 export const subjectLabel = (row: Submission) =>
 	row.email_deleted ? __('(Message deleted)') : row.subject || __('(No subject)')
 
-export type SubmissionAction = {
+type SubmissionAction = {
 	label: string
 	icon: Component
 	theme?: string
 	onClick: () => void
 }
 
-export type SubmissionActionHandlers = {
+type SubmissionActionHandlers = {
 	/** When provided, "Open email" leads the menu (for submissions whose message still exists). */
 	openEmail?: () => void
 	sendNow: () => void
 	reschedule: () => void
 	cancelDelivery: () => void
 	sendAgain: () => void
-	tryAgainNow: () => void
 	remove: () => void
 }
 
@@ -184,9 +183,9 @@ export const submissionActions = (
 		return [...openEmail, ...(row.email_deleted ? [] : [sendAgain]), remove]
 
 	if (row.status === 'retrying' || row.status === 'queued') {
-		const retry = { label: __('Try again now'), icon: RefreshCw, onClick: on.tryAgainNow }
-		// A released delivery stays cancellable for as long as its submission is pending.
-		return [...openEmail, retry, ...(row.undo_status === 'pending' ? [cancel] : [])]
+		// The shared cluster retries on its own schedule; a released delivery stays
+		// cancellable for as long as its submission is pending.
+		return [...openEmail, ...(row.undo_status === 'pending' ? [cancel] : [])]
 	}
 
 	if (row.status === 'scheduled') {

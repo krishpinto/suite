@@ -12,14 +12,9 @@ export class ConsumerManager {
 	private scoreListeners: Array<
 		(kind: 'audio' | 'video', score: number) => void
 	> = [];
-	private closeListeners: Array<(consumerData: ConsumerData) => void> = [];
 
 	onScore(listener: (kind: 'audio' | 'video', score: number) => void): void {
 		this.scoreListeners.push(listener);
-	}
-
-	onClose(listener: (consumerData: ConsumerData) => void): void {
-		this.closeListeners.push(listener);
 	}
 
 	async createConsumer(
@@ -162,13 +157,7 @@ export class ConsumerManager {
 			}
 		}
 
-		for (const listener of this.closeListeners) listener(consumerData);
-
 		loggers.consumerManager.info('Consumer closed: %s', consumerId);
-	}
-
-	getConsumer(consumerId: string): mediasoup.types.Consumer | undefined {
-		return this.consumers.get(consumerId)?.consumer;
 	}
 
 	getConsumerData(consumerId: string): ConsumerData | undefined {
@@ -207,6 +196,18 @@ export class ConsumerManager {
 
 	getConsumerCount(): number {
 		return this.consumers.size;
+	}
+
+	getConsumerCountsByWorker(
+		roomWorkerIds: Map<string, number>,
+	): Map<number, number> {
+		const counts = new Map<number, number>();
+		for (const data of this.consumers.values()) {
+			const workerId = roomWorkerIds.get(data.roomId);
+			if (workerId === undefined) continue;
+			counts.set(workerId, (counts.get(workerId) ?? 0) + 1);
+		}
+		return counts;
 	}
 
 	async pauseConsumer(consumerId: string): Promise<boolean> {

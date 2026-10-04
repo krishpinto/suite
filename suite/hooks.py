@@ -254,6 +254,9 @@ doc_events = {
             "suite.mail.events.create_user_settings",
         ],
         "on_update": [
+            # First: the disabled account role applied below may cut the JMAP access the
+            # deletion needs.
+            "suite.mail.events.delete_push_subscriptions_on_disable",
             "suite.mail.events.update_account_password",
             "suite.mail.events.clear_sessions_on_disable",
             "suite.mail.events.apply_disabled_account_role",
@@ -275,6 +278,10 @@ user_invitation = {
 
 # Suite's onboarding replaces the built-in desk setup wizard
 setup_wizard_url = "/suite/setup"
+
+# Heal the user's JMAP push subscription on login (enqueued; a lost subscription silently
+# ends webhooks — realtime events and mailbox-count invalidation both ride on them)
+on_login = ["suite.mail.doctype.push_subscription.push_subscription.on_login"]
 
 # ============================================================================
 # Scheduled Tasks (per-frequency lists combined; cron keys de-duplicated)
@@ -313,10 +320,7 @@ scheduler_events = {
         ],
         "*/5 * * * *": [
             # mail
-            "suite.mail.doctype.server_job.server_job.retry_failed_jobs",
             "suite.mail.doctype.mail_queue.mail_queue.enqueue_process_pending_emails",
-            "suite.mail.doctype.server_deployment.server_deployment.retry_failed_deployments",
-            "suite.mail.doctype.server_ansible_play.server_ansible_play.retry_failed_ansible_plays",
         ],
     },
 }
@@ -379,9 +383,6 @@ ignore_links_on_delete = [
     "Drive DAV Lock",
     # mail
     "Mail Account Request",
-    "Server Job",
-    "Server Ansible Play",
-    "Server Deployment",
     "JMAP Account",
     "User Account",
     "Screened Email Address",
@@ -425,6 +426,12 @@ ALLOWED_PATHS = [
     "/api/method/frappe.website.doctype.web_form.web_form.accept",
     "/api/method/frappe.core.doctype.user.user.test_password_strength",
     "/api/method/frappe.core.doctype.user.user.update_password",
+    "/api/v2/method/suite.meet.api.recording.get_state",
+    "/api/v2/method/suite.meet.api.recording.get_preflight",
+    "/api/v2/method/suite.meet.api.recording.start",
+    "/api/v2/method/suite.meet.api.recording.stop",
+    "/api/v2/method/suite.api.account.get_logged_in_user",
+    "/api/v2/method/suite.calendar.api.get_calendar_events",
     # drive — WebDAV mount root
     "/dav",
 ]
@@ -436,7 +443,12 @@ ALLOWED_WILDCARD_PATHS = [
     # endpoints still called by Frappe Framework (see override_whitelisted_methods).
     "/api/method/mail.api.",
     "/api/method/suite.calendar.api.",
-    "/api/method/suite.meet.api.",
+    # meet — recorder callbacks remain on their existing protocol during the API cutover
+    "/api/method/suite.meet.api.recording.recorder_",
+    "/api/v2/method/suite.meet.api.meeting.",
+    "/api/v2/method/suite.meet.api.schedule.",
+    "/api/v2/method/suite.meet.api.test_helpers.",
+    "/api/v2/document/Meet%20Room/",
     "/api/method/suite.drive.api.",
     "/api/method/suite.writer.api.",
     # writer — backward-compatible prefix for embed URLs stored in old documents

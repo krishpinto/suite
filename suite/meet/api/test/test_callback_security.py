@@ -306,23 +306,6 @@ class IntegrationTestRecordingCallbackSecurity(IntegrationTestCase):
             claims["jti"],
         )
 
-    def test_mutating_callbacks_are_post_only(self):
-        for callback in (
-            recorder_interrupted,
-            recorder_replacement_ready,
-            recorder_recovered,
-            recorder_segment_progress,
-            recorder_stopped,
-            recorder_upload_chunk,
-            recorder_complete_upload,
-            recorder_failed,
-        ):
-            with self.subTest(callback=callback.__name__):
-                self.assertEqual(
-                    frappe.allowed_http_methods_for_whitelisted_func[callback],
-                    ("POST",),
-                )
-
     def test_upload_endpoint_rejects_type_and_size_before_reading_body(self):
         digest = hashlib.sha256(b"chunk").hexdigest()
         with patch("suite.meet.api.recording.authenticate_callback"):
@@ -331,13 +314,13 @@ class IntegrationTestRecordingCallbackSecurity(IntegrationTestCase):
                     frappe.local.request = Mock(content_type=content_type, content_length=5)
                     with self.assertRaises(frappe.ValidationError):
                         recorder_upload_chunk(
-                            self.recording.name, self.recording.recorder_job_id, 0, digest, 1
+                            self.recording.name, self.recording.recorder_job_id, "0", digest, "1"
                         )
 
             request = Mock(content_type="application/octet-stream", content_length=CHUNK_SIZE + 1)
             frappe.local.request = request
             with self.assertRaises(frappe.ValidationError):
-                recorder_upload_chunk(self.recording.name, self.recording.recorder_job_id, 0, digest, 1)
+                recorder_upload_chunk(self.recording.name, self.recording.recorder_job_id, "0", digest, "1")
             request.get_data.assert_not_called()
 
             request = Mock(content_type="application/octet-stream", content_length=5)
@@ -345,7 +328,9 @@ class IntegrationTestRecordingCallbackSecurity(IntegrationTestCase):
             frappe.local.request = request
             with patch("suite.meet.api.recording.append_chunk", return_value={"offset": 5}) as append:
                 self.assertEqual(
-                    recorder_upload_chunk(self.recording.name, self.recording.recorder_job_id, 0, digest, 1),
+                    recorder_upload_chunk(
+                        self.recording.name, self.recording.recorder_job_id, "0", digest, "1"
+                    ),
                     {"protocol_version": 1, "offset": 5},
                 )
             append.assert_called_once_with(

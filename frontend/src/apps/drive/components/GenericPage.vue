@@ -61,8 +61,8 @@ import { confirmRestore, confirmRemove, confirmDeleteForever } from '@/apps/driv
 import { entitiesDownload } from '@/apps/drive/utils/download'
 import { ref, computed, watch, watchEffect, provide, inject, onBeforeUnmount, nextTick } from 'vue'
 import { useRoute } from 'vue-router'
-import { onKeyDown, useEventListener } from '@vueuse/core'
-import { frappeRequest, shellScrollContainer as scrollHost } from 'frappe-ui'
+import { useEventListener } from '@vueuse/core'
+import { frappeRequest, shellScrollContainer as scrollHost, useKeyboardShortcut } from 'frappe-ui'
 import { useSessionStore, useCurrentUser } from '@/boot/session'
 import { activeEntity, startRename } from '@/apps/drive/data/selection'
 import { uploads } from '@/apps/drive/data/uploads'
@@ -89,6 +89,7 @@ import { getFileLink } from '@/apps/drive/ui/drive/js/utils'
 import LucideClock from '~icons/lucide/clock'
 import LucideDownload from '~icons/lucide/download'
 import LucideExternalLink from '~icons/lucide/external-link'
+import LucideSquareArrowOutUpRight from '~icons/lucide/square-arrow-out-up-right'
 import LucideEye from '~icons/lucide/eye'
 import LucideInfo from '~icons/lucide/info'
 import LucideLink2 from '~icons/lucide/link-2'
@@ -215,34 +216,48 @@ function clearSelection() {
   selections.value = new Set()
 }
 
-// Shared by both views, as selections is Drive's own Set-based model.
-const isTyping = (e) =>
-  e.target.classList.contains('ProseMirror') ||
-  e.target.tagName === 'INPUT' ||
-  e.target.tagName === 'TEXTAREA'
+// Links keep their own confirm flow and virtual nodes have no standalone
+// page, so neither can be opened in a new tab. Shared by the context-menu
+// action and the mod+Enter shortcut.
+const canOpenInNewTab = (entity) =>
+  !isVirtual(entity) && entity.file_type !== 'Link'
 
-onKeyDown('a', (e) => {
-  if (isTyping(e)) return
-  if (e.metaKey || e.ctrlKey) {
-    toggleSelectAll()
-    e.preventDefault()
-  }
-})
-onKeyDown('Backspace', (e) => {
-  if (isTyping(e)) return
-  if (e.metaKey) emitter.emit('remove')
-})
-onKeyDown('m', (e) => {
-  if (isTyping(e)) return
-  if (e.ctrlKey) emitter.emit('move')
-})
-onKeyDown('Escape', (e) => {
-  if (isTyping(e)) return
-  // Let an open dialog handle its own Escape.
-  if (document.querySelector('.dialog-content[data-state="open"]')) return
-  clearSelection()
-  e.preventDefault()
-})
+useKeyboardShortcut([
+  {
+    combo: 'Mod+A',
+    description: __('Select all'),
+    group: __('List'),
+    handler: toggleSelectAll,
+  },
+  {
+    combo: 'Escape',
+    description: __('Unselect all'),
+    group: __('List'),
+    handler: clearSelection,
+  },
+  {
+    combo: 'Ctrl+M',
+    description: __('Move selected files'),
+    group: __('List'),
+    handler: () => emitter.emit('move'),
+  },
+  {
+    combo: 'Mod+Backspace',
+    description: __('Delete selected files'),
+    group: __('List'),
+    handler: () => emitter.emit('remove'),
+  },
+  {
+    combo: 'Mod+Enter',
+    description: __('Open selected file in new tab'),
+    group: __('List'),
+    handler: () => {
+      if (route.name === 'drive-Trash' || selectedEntitities.value.length !== 1) return
+      const [entity] = selectedEntitities.value
+      if (canOpenInNewTab(entity)) openEntity(entity, true)
+    },
+  },
+])
 
 const verifyAccess = computed(() => props.verify?.data || !props.verify)
 watchEffect(() => {
@@ -531,6 +546,12 @@ const actionItems = computed(() => {
         isEnabled: (e) => e.file_type === 'Link',
       },
       {
+        label: __('Open in new tab'),
+        icon: LucideSquareArrowOutUpRight,
+        action: ([entity]) => openEntity(entity, true),
+        isEnabled: canOpenInNewTab,
+      },
+      {
         label: __('Show Info'),
         icon: LucideInfo,
         action: () => (listDialog.value = 'i'),
@@ -651,33 +672,6 @@ const actionItems = computed(() => {
     ]
   }
 })
-
-async function newLink() {
-  if (!document.hasFocus()) return
-  try {
-    const text = await navigator.clipboard.readText()
-    if (localStorage.getItem('prevClip') === text) return
-    localStorage.setItem('prevClip', text)
-    const url = new URL(text)
-    if (url.host)
-      toast('Link detected', {
-        description: text,
-        action: {
-          label: 'Add',
-          onClick: () => {
-            listDialog.value = 'l'
-          },
-        },
-      })
-  } catch { }
-}
-
-// JS doesn't allow direct reading of clipboard
-if (settings.data?.auto_detect_links) {
-  newLink()
-  window.addEventListener('focus', newLink)
-  window.addEventListener('copy', newLink)
-}
 
 const socket = inject('socket')
 socket.on('list-add', ({ file }) => {

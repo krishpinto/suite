@@ -1,0 +1,274 @@
+import { createHmac, randomUUID } from "node:crypto";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { cpus, hostname, platform, release, totalmem } from "node:os";
+import { dirname, resolve } from "node:path";
+import { parseArgs } from "node:util";
+import { fileURLToPath } from "node:url";
+import { chromium } from "@playwright/test";
+import { createServer } from "vite";
+import { bitrate, boundedInteger, cameraDeliveryReady, containsJwt, delta, evaluateCameras, evaluateRotation, evaluateScreens, finiteDelta, parseResourceMetrics, percentile, rotationWindows, screenCount, targetMetadata } from "./report.mjs";
+
+const root = dirname(fileURLToPath(import.meta.url));
+const { values } = parseArgs({ options: {
+	"sfu-url": { type: "string", default: "http://127.0.0.1:3001" },
+	"allow-remote-target": { type: "boolean", default: false },
+	"meeting-id": { type: "string", default: `load-${randomUUID()}` },
+	site: { type: "string", default: "load.test" },
+	count: { type: "string", default: "2" },
+	media: { type: "string", default: "none" },
+	scenario: { type: "string", default: "uniform" },
+	talkers: { type: "string" },
+	cameras: { type: "string" },
+	screens: { type: "string" },
+	"rotation-interval-ms": { type: "string", default: "1000" },
+	consume: { type: "string", default: "all" },
+	"render-media": { type: "boolean", default: false },
+	"ramp-ms": { type: "string", default: "250" },
+	"duration-seconds": { type: "string", default: "5" },
+	"cleanup-seconds": { type: "string", default: "65" },
+	"token-file": { type: "string" },
+	"jwt-secret-env": { type: "string", default: "SFU_LOAD_JWT_SECRET" },
+	"metrics-token-env": { type: "string", default: "SFU_METRICS_TOKEN" },
+	output: { type: "string" },
+}, strict: true });
+
+const count = boundedInteger(values.count, "count", 1, 150);
+const durationSeconds = boundedInteger(values["duration-seconds"], "duration-seconds", 1, 600);
+const cleanupSeconds = boundedInteger(values["cleanup-seconds"], "cleanup-seconds", 1, 90);
+const rampMs = boundedInteger(values["ramp-ms"], "ramp-ms", 0, 5000);
+const rotationIntervalMs = boundedInteger(values["rotation-interval-ms"], "rotation-interval-ms", 250, 60_000);
+const talkers = boundedInteger(values.talkers ?? String(Math.min(10, count)), "talkers", 1, count);
+const cameras = boundedInteger(values.cameras ?? String(Math.min(40, count)), "cameras", 1, Math.min(40, count));
+const screens = screenCount(values.screens, count);
+if (!["none", "audio", "video", "both"].includes(values.media)) throw new Error("media must be none, audio, video, or both");
+if (!["uniform", "rotating-audio", "representative-camera", "representative-screen"].includes(values.scenario)) throw new Error("scenario must be uniform, rotating-audio, representative-camera, or representative-screen");
+if (values.scenario === "rotating-audio" && values.media !== "audio") throw new Error("rotating-audio requires --media audio");
+if (values.scenario === "representative-camera" && values.media !== "none") throw new Error("representative-camera determines media; omit --media");
+if (values.scenario === "representative-screen" && values.media !== "none") throw new Error("representative-screen determines media; omit --media");
+if (!["all", "none"].includes(values.consume)) throw new Error("consume must be all or none");
+if (!/^load-[0-9a-f-]{36}$/.test(values["meeting-id"]) || !/^load(?:[.-][a-z0-9-]+)*\.test$/i.test(values.site)) {
+	throw new Error("Use the generated load UUID room and a load*.test site namespace");
+}
+const target = targetMetadata(values["sfu-url"], values["allow-remote-target"]);
+const output = resolve(values.output || resolve(root, "results", `${new Date().toISOString().replaceAll(":", "-")}.json`));
+const metricsToken = process.env[values["metrics-token-env"]];
+if (!metricsToken) throw new Error(`Set ${values["metrics-token-env"]} for idle and cleanup measurement`);
+
+const report = {
+	schemaVersion: 1,
+	scope: target.loopback ? "local-correctness-only" : "server-measurement-only",
+	qualified: false,
+	startedAt: new Date().toISOString(),
+	target,
+	config: { count, durationSeconds, cleanupSeconds, rampMs, media: values.media, consume: values.consume,
+		scenario: values.scenario, talkers, rotationIntervalMs, cameras, screens,
+		renderMedia: values["render-media"], meetingId: values["meeting-id"], site: values.site,
+		authSource: values["token-file"] ? "token-file" : "environment-signed" },
+	host: { hostname: hostname(), platform: platform(), release: release(), node: process.version,
+		logicalCpus: cpus().length, cpuModel: cpus()[0]?.model, totalMemoryBytes: totalmem() },
+	browser: {}, resources: {}, samples: [], participants: [], cleanup: [], errors: [],
+};
+const beforeUsage = process.resourceUsage();
+const beforeMemory = process.memoryUsage();
+const pages = [], browsers = [];
+let vite;
+
+function endpoint(path) {
+	const url = new URL(target.endpoint); url.pathname = `${url.pathname.replace(/\/$/, "")}/${path}`; return url;
+}
+async function fetchText(path, authenticated = false) {
+	const response = await fetch(endpoint(path), { headers: authenticated ? { Authorization: `Bearer ${metricsToken}` } : {},
+		signal: AbortSignal.timeout(5000), redirect: "error" });
+	if (!response.ok) throw new Error(`${path} returned HTTP ${response.status}`);
+	const text = await response.text();
+	if (text.length > 2_000_000) throw new Error(`${path} response exceeds 2 MB`);
+	return text;
+}
+async function sample(phase) {
+	const health = JSON.parse(await fetchText("health"));
+	const resources = parseResourceMetrics(await fetchText("metrics", true));
+	const entry = { at: new Date().toISOString(), phase, health, resources };
+	report.samples.push(entry); return entry;
+}
+function isIdle(entry) {
+	return entry.health.rooms === 0 && entry.health.peers === 0 &&
+		["rooms", "participants", "peers", "transports", "producers", "consumers", "sockets"]
+			.every((key) => (entry.resources[key] ?? 0) === 0);
+}
+function signedToken(secret, participant) {
+	const encode = (value) => Buffer.from(JSON.stringify(value)).toString("base64url");
+	const now = Math.floor(Date.now() / 1000);
+	const unsigned = `${encode({ alg: "HS256", typ: "JWT" })}.${encode({ user_id: participant.userId,
+		user_name: participant.name, meeting_id: values["meeting-id"], site: values.site, scope: "full",
+		is_host: false, is_cohost: false, is_guest: false, e2ee_required: false, iat: now, exp: now + 1800 })}`;
+	return `${unsigned}.${createHmac("sha256", secret).update(unsigned).digest("base64url")}`;
+}
+async function clients() {
+	if (values["token-file"]) {
+		let parsed;
+		try { parsed = (await readFile(resolve(values["token-file"]), "utf8")).split("\n").filter(Boolean).map(JSON.parse); }
+		catch { throw new Error("Token file is unreadable or malformed"); }
+		if (parsed.length !== count) throw new Error("Token file must contain exactly count JSONL entries");
+		return parsed.map(({ userId, name, token }) => ({ userId, name, token }));
+	}
+	const secret = process.env[values["jwt-secret-env"]];
+	if (!secret) throw new Error(`Set ${values["jwt-secret-env"]} or provide --token-file`);
+	return Array.from({ length: count }, (_, index) => {
+		const participant = { userId: `load-${index + 1}@example.invalid`, name: `Load ${index + 1}` };
+		return { ...participant, token: signedToken(secret, participant) };
+	});
+}
+async function wait(ms) { return new Promise((resolveDelay) => setTimeout(resolveDelay, ms)); }
+
+try {
+	const initial = await sample("before");
+	if (!isIdle(initial)) throw new Error("Target is not idle; no traffic was sent");
+	const participants = await clients();
+	vite = await createServer({ root, logLevel: "error", server: { host: "127.0.0.1", port: 0 },
+		fs: { strict: true, allow: [root], deny: ["**/tokens.jsonl", output] } });
+	await vite.listen();
+	const address = vite.httpServer.address();
+	const clientUrl = `http://127.0.0.1:${address.port}`;
+	const browser = await chromium.launch({ headless: true, channel: process.env.CHROME_CHANNEL,
+		args: ["--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream", "--autoplay-policy=no-user-gesture-required"] });
+	browsers.push(browser); report.browser = { version: browser.version(), channel: process.env.CHROME_CHANNEL || "playwright-chromium", contexts: 1 };
+	const context = await browser.newContext({ permissions: ["camera", "microphone"] });
+	for (const [index, participant] of participants.entries()) {
+		const page = await context.newPage(); pages.push(page);
+		page.on("pageerror", () => report.errors.push(`participant ${index + 1}: page error`));
+		await page.goto(clientUrl, { waitUntil: "networkidle", timeout: 15_000 });
+		const representativeCamera = values.scenario === "representative-camera" && index < cameras;
+		const representativeScreen = values.scenario === "representative-screen";
+		await page.evaluate((config) => window.meetLoad.start(config), { ...participant, sfuUrl: target.endpoint,
+			meetingId: values["meeting-id"], media: representativeCamera || (representativeScreen && index < screens) ? "video" : values.media, consume: values.consume === "all", renderMedia: values["render-media"],
+			representativeCamera, representativeScreen, rotatingAudio: values.scenario === "rotating-audio", audioActive: index < talkers });
+		if (rampMs) await wait(rampMs);
+	}
+	if (["representative-camera", "representative-screen"].includes(values.scenario) && values.consume === "all") {
+		const publishers = values.scenario === "representative-screen" ? screens : cameras;
+		const deadline = Date.now() + 15_000;
+		while (!cameraDeliveryReady(await Promise.all(pages.map((page) => page.evaluate(() => window.meetLoad.endpointCounts()))), publishers, count)) {
+			if (Date.now() >= deadline) throw new Error("Camera delivery did not converge before the hold sample");
+			await wait(100);
+		}
+	}
+	const hold = await sample("hold");
+	if (hold.health.rooms !== 1 || hold.health.peers !== count) throw new Error("SFU hold counts do not match this run");
+	if (values.scenario === "rotating-audio") {
+		const schedule = rotationWindows(participants.map(({ userId }) => userId), talkers, durationSeconds * 1000, rotationIntervalMs);
+		report.rotation = { source: "Web Audio oscillator -> GainNode -> MediaStreamDestination", frequencyHz: 440, activeGain: 0.15,
+			silenceGain: 0, windows: [], limitations: "Gain schedule is configured locally; audio energy is reported only when Chromium exposes totalAudioEnergy." };
+		const resourceSamples = [hold.resources];
+		let previousWindow;
+		for (const window of schedule) {
+			await Promise.all(pages.map((page, index) => page.evaluate(({ active }) => window.meetLoad.setAudioActive(active),
+				{ active: window.expectedActiveIds.includes(participants[index].userId) })));
+			const actualStartedAt = new Date();
+			if (previousWindow) {
+				previousWindow.actualEndedAt = actualStartedAt.toISOString();
+				previousWindow.actualDurationMs = actualStartedAt - new Date(previousWindow.actualStartedAt);
+			}
+			const before = await Promise.all(pages.map((page) => page.evaluate(() => window.meetLoad.status())));
+			await wait(window.durationMs);
+			const after = await Promise.all(pages.map((page) => page.evaluate(() => window.meetLoad.status())));
+			const rotationSample = await sample(`rotation-${window.index}`); resourceSamples.push(rotationSample.resources);
+			const observations = participants.map((participant, index) => ({ userId: participant.userId,
+				expectedActive: window.expectedActiveIds.includes(participant.userId),
+				producerIdsBefore: before[index].producerStats.map(({ id }) => id).sort(), producerIdsAfter: after[index].producerStats.map(({ id }) => id).sort(),
+				outboundBytesDelta: after[index].bytesSent - before[index].bytesSent,
+				outboundAudioEnergyDelta: finiteDelta(before[index].producerStats[0]?.totalAudioEnergy, after[index].producerStats[0]?.totalAudioEnergy),
+				expectedInbound: values.consume === "all" ? count - 1 : 0,
+				inboundAdvanced: after[index].consumerStats.filter((entry) => entry.bytesReceived > (before[index].consumerStats.find(({ producerId }) => producerId === entry.producerId)?.bytesReceived ?? 0)).length }));
+			previousWindow = { ...window, actualStartedAt: actualStartedAt.toISOString(), observations };
+			report.rotation.windows.push(previousWindow);
+		}
+		await Promise.all(pages.map((page) => page.evaluate(() => window.meetLoad.setAudioActive(false))));
+		const actualEndedAt = new Date();
+		previousWindow.actualEndedAt = actualEndedAt.toISOString();
+		previousWindow.actualDurationMs = actualEndedAt - new Date(previousWindow.actualStartedAt);
+		report.errors.push(...evaluateRotation(report.rotation.windows, resourceSamples));
+	} else if (["representative-camera", "representative-screen"].includes(values.scenario)) {
+		const isScreen = values.scenario === "representative-screen"; const publishers = isScreen ? screens : cameras;
+		const before = await Promise.all(pages.map((page) => page.evaluate(() => window.meetLoad.status())));
+		await wait(durationSeconds * 1000);
+		const after = await Promise.all(pages.map((page) => page.evaluate(() => window.meetLoad.status())));
+		const cameraSample = await sample(isScreen ? "screen-window" : "camera-window");
+		const expectedConsumers = values.consume === "all" ? publishers * (count - 1) : 0;
+		const observations = participants.map((participant, index) => {
+			const beforeVideo = before[index].producerStats.filter(({ kind }) => kind === "video");
+			const afterVideo = after[index].producerStats.filter(({ kind }) => kind === "video");
+			const beforeConsumers = before[index].consumerStats.filter(({ kind }) => kind === "video");
+			const afterConsumers = after[index].consumerStats.filter(({ kind }) => kind === "video");
+			const expectedReceivers = values.consume === "all" ? publishers - (index < publishers ? 1 : 0) : 0;
+			const decoded = afterConsumers.map((entry) => finiteDelta(beforeConsumers.find(({ producerId }) => producerId === entry.producerId)?.framesDecoded, entry.framesDecoded));
+			const browserDecoded = afterConsumers.map((entry) => finiteDelta(beforeConsumers.find(({ producerId }) => producerId === entry.producerId)?.browserDecodedFrames, entry.browserDecodedFrames));
+			const elapsedMs = after[index].sampledAtMs - before[index].sampledAtMs;
+			const outboundBytesDelta = afterVideo.reduce((sum, entry) => sum + entry.bytesSent, 0) - beforeVideo.reduce((sum, entry) => sum + entry.bytesSent, 0);
+			return { userId: participant.userId, publisher: index < publishers, expectedReceivers, elapsedMs,
+				producerIdsBefore: beforeVideo.map(({ id }) => id).sort(), producerIdsAfter: afterVideo.map(({ id }) => id).sort(),
+				producerReady: afterVideo.every((entry) => !entry.paused && entry.trackEnabled && entry.trackReadyState === "live"),
+				outboundBytesDelta, outboundBitrateBps: bitrate(0, outboundBytesDelta, elapsedMs),
+				framesEncodedDelta: finiteDelta(beforeVideo[0]?.framesEncoded, afterVideo[0]?.framesEncoded), receiverCount: afterConsumers.length,
+				inboundAdvanced: afterConsumers.filter((entry) => entry.bytesReceived > (beforeConsumers.find(({ producerId }) => producerId === entry.producerId)?.bytesReceived ?? 0)).length,
+				inbound: afterConsumers.map((entry) => { const prior = beforeConsumers.find(({ producerId }) => producerId === entry.producerId); const bytesDelta = entry.bytesReceived - (prior?.bytesReceived ?? 0);
+					return { producerId: entry.producerId, bytesDelta, bitrateBps: bitrate(0, bytesDelta, elapsedMs), framesDecodedDelta: finiteDelta(prior?.framesDecoded, entry.framesDecoded),
+					framesPerSecond: entry.framesPerSecond, width: entry.frameWidth, height: entry.frameHeight, browserDecodedFramesDelta: finiteDelta(prior?.browserDecodedFrames, entry.browserDecodedFrames) }; }),
+				decodedObserved: decoded.filter((value) => value !== null).length, decodedAdvanced: decoded.filter((value) => value > 0).length,
+				browserDecodedObserved: browserDecoded.filter((value) => value !== null).length, browserDecodedAdvanced: browserDecoded.filter((value) => value > 0).length,
+				sender: afterVideo[0] ? { framesPerSecond: afterVideo[0].framesPerSecond, mediaSource: afterVideo[0].mediaSource } : null };
+		});
+		const section = { requested: { width: isScreen ? 1920 : 1280, height: isScreen ? 1080 : 720, framesPerSecond: 30 }, source: "deterministic distinct moving time-coded canvas",
+			window: { durationSeconds, observations }, limitations: "Requested/source and observed sender/receiver stats are separate; unavailable Chromium stats remain null." };
+		if (isScreen) { report.screen = { ...section, configuredEncodingMaxBitrateBps: 4_000_000,
+			limitations: `${section.limitations} The encoding maxBitrate is a target cap; a short local run does not establish sustained <=4 Mbps.` };
+			report.errors.push(...evaluateScreens(observations, [hold.resources, cameraSample.resources], { producers: screens, consumers: expectedConsumers }, 4_000_000)); }
+		else { report.camera = section; report.errors.push(...evaluateCameras(observations, [hold.resources, cameraSample.resources], { producers: cameras, consumers: expectedConsumers })); }
+	} else await wait(durationSeconds * 1000);
+	report.participants = await Promise.all(pages.map((page) => page.evaluate(() => window.meetLoad.status())));
+	for (const [index, participant] of report.participants.entries()) {
+		if (participant.phase !== "running") report.errors.push(`participant ${index + 1}: not running`);
+		const publishes = values.media !== "none" || (values.scenario === "representative-camera" && index < cameras) || (values.scenario === "representative-screen" && index < screens);
+		if (publishes && participant.bytesSent === 0) report.errors.push(`participant ${index + 1}: no outbound RTP observed`);
+		if (count > 1 && values.consume === "all" && (values.media !== "none" || values.scenario === "representative-camera") && participant.bytesReceived === 0) report.errors.push(`participant ${index + 1}: no inbound RTP observed`);
+		report.errors.push(...participant.errors.map((error) => `participant ${index + 1}: ${error}`));
+	}
+} catch (error) {
+	report.errors.push(error instanceof Error ? error.message.replace(/eyJ[A-Za-z0-9._-]+/g, "[redacted]") : "run failed");
+} finally {
+	report.cleanup = await Promise.all(pages.map(async (page, index) => {
+		try { return { participant: index + 1, ...(await page.evaluate(() => window.meetLoad.stop())) }; }
+		catch { return { participant: index + 1, localMediaReleased: false }; }
+	}));
+	await Promise.allSettled(browsers.map((browser) => browser.close()));
+	if (vite) await vite.close();
+	try {
+		const cleanupStarted = Date.now();
+		while (Date.now() - cleanupStarted < cleanupSeconds * 1000) {
+			const health = JSON.parse(await fetchText("health"));
+			if (health.rooms === 0 && health.peers === 0) break;
+			await wait(1000);
+		}
+		report.cleanupElapsedMs = Date.now() - cleanupStarted;
+		const after = await sample("after");
+		report.resources = { before: report.samples[0]?.resources || {}, hold: report.samples.find((entry) => entry.phase === "hold")?.resources || {},
+			after: after.resources, holdDelta: delta(report.samples[0]?.resources || {}, report.samples.find((entry) => entry.phase === "hold")?.resources || {}),
+			afterDelta: delta(report.samples[0]?.resources || {}, after.resources) };
+		report.cleanupVerified = isIdle(after) && report.cleanup.every((entry) => entry.localMediaReleased);
+		if (!report.cleanupVerified) report.errors.push("Cleanup did not return measured resources and local media to idle");
+	} catch { report.errors.push("Final resource sample failed"); report.cleanupVerified = false; }
+	const usage = process.resourceUsage(); const memory = process.memoryUsage();
+	report.host.generatorProcessDelta = { userCpuMicros: usage.userCPUTime - beforeUsage.userCPUTime,
+		systemCpuMicros: usage.systemCPUTime - beforeUsage.systemCPUTime,
+		maxRssBytes: usage.maxRSS * 1024, rssBytes: memory.rss, rssDeltaBytes: memory.rss - beforeMemory.rss };
+	report.summary = { passed: report.errors.length === 0 && report.cleanupVerified,
+		joinP50Ms: percentile(report.participants.map((entry) => entry.joinMs), 0.5),
+		joinP95Ms: percentile(report.participants.map((entry) => entry.joinMs), 0.95),
+		firstRemoteMediaP95Ms: percentile(report.participants.map((entry) => entry.firstRemoteMediaMs), 0.95),
+		totalBytesSent: report.participants.reduce((sum, entry) => sum + entry.bytesSent, 0),
+		totalBytesReceived: report.participants.reduce((sum, entry) => sum + entry.bytesReceived, 0) };
+	report.finishedAt = new Date().toISOString();
+	if (containsJwt(report)) throw new Error("Refusing to write a report containing a JWT");
+	await mkdir(dirname(output), { recursive: true }); await writeFile(output, `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
+	console.log(`${report.scope}: ${report.summary.passed ? "passed" : "failed"}; qualified=false; report=${output}`);
+	process.exitCode = report.summary.passed ? 0 : 1;
+}

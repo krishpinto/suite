@@ -1,8 +1,13 @@
 import type { Server } from 'socket.io';
 import type { SFUConfig } from '../config';
 import type { MediasoupManager } from '../mediasoup/MediasoupManager';
+import type { SttManager } from '../stt/SttManager';
 import type { Telemetry } from '../telemetry/Telemetry';
-import type { ClientToServerEvents, ServerToClientEvents } from '../types';
+import type {
+	ClientToServerEvents,
+	RecordingProofRequest,
+	ServerToClientEvents,
+} from '../types';
 import { loggers } from '../utils/logger';
 import { RateLimiter } from '../utils/rateLimiter';
 import type { AuthManager } from './AuthManager';
@@ -25,7 +30,9 @@ import { registerReactionHandlers } from './handlers/ReactionHandlers';
 import { registerRoomJoinHandlers } from './handlers/RoomJoinHandlers';
 import { registerRoomQueryHandlers } from './handlers/RoomQueryHandlers';
 import { registerScreenShareHandlers } from './handlers/ScreenShareHandlers';
+import { registerSttHandlers } from './handlers/SttHandlers';
 import { registerWebRtcTransportHandlers } from './handlers/WebRtcTransportHandlers';
+import { ParticipantConnectionLifecycle } from './ParticipantConnectionLifecycle';
 import type { RecordingGrantManager } from './RecordingGrantManager';
 import { RoomLifecycleCoordinator } from './RoomLifecycleCoordinator';
 import { RoomRegistry } from './RoomRegistry';
@@ -41,6 +48,7 @@ export class SocketHandlerManager {
 	private rateLimiter: RateLimiter;
 	private e2eeEpochRelay: E2EEEpochRelay;
 	private roomLifecycle: RoomLifecycleCoordinator;
+	private participantConnections: ParticipantConnectionLifecycle;
 	private telemetry: Telemetry;
 	private registerHandlers: ((socket: import('socket.io').Socket) => void)[];
 	private idleExpirySweep: NodeJS.Timeout | null = null;
@@ -54,6 +62,7 @@ export class SocketHandlerManager {
 		private readonly runtime: SFUConfig['runtime'],
 		coordinatorPersistence?: E2eeCoordinatorPersistence,
 		private readonly recordingGrantManager?: RecordingGrantManager,
+		sttManager?: SttManager,
 	) {
 		this.io = io;
 		this.mediasoup = mediasoup;
@@ -71,11 +80,21 @@ export class SocketHandlerManager {
 			this.runtime.bypassRateLimits,
 		);
 		this.e2eeEpochRelay.setRoster(roster);
+		sttManager?.setEmitToSubscribers((roomId, socketIds, event, data) => {
+			this.registry.emitToFullAccessSockets(roomId, socketIds, event, data);
+		});
 		this.roomLifecycle = new RoomLifecycleCoordinator(
 			this.registry,
 			this.e2eeEpochRelay,
 			roster,
 			this.mediasoup,
+		);
+		this.participantConnections = new ParticipantConnectionLifecycle(
+			this.registry,
+			this.roomLifecycle,
+			this.mediasoup,
+			this.e2eeEpochRelay,
+			roster,
 		);
 
 		const deps: HandlerDeps = {
@@ -85,8 +104,10 @@ export class SocketHandlerManager {
 			mediasoup,
 			authManager,
 			rateLimiter: this.rateLimiter,
+			sttManager,
 			e2eeEpochRelay: this.e2eeEpochRelay,
 			e2eeRoster: roster,
+			participantConnections: this.participantConnections,
 			telemetry,
 			runtime: this.runtime,
 		};
@@ -103,6 +124,7 @@ export class SocketHandlerManager {
 			registerHostControlHandlers(deps),
 			registerScreenShareHandlers(deps),
 			registerPollHandlers(deps),
+			registerSttHandlers(deps),
 			registerChatHandlers(deps),
 			registerReactionHandlers(deps),
 			registerRaiseHandHandlers(deps),
@@ -114,6 +136,7 @@ export class SocketHandlerManager {
 			this.registry.emitProducerClosed(event.roomId, {
 				participantId: event.participantId,
 				producerId: event.producerId,
+				kind: event.kind,
 				isScreen: event.isScreen,
 				reason: event.reason,
 				source: event.source,
@@ -296,7 +319,7 @@ export class SocketHandlerManager {
 
 export function isRecordingProofRequest(
 	value: unknown,
-): value is import('../types').RecordingProofRequest {
+): value is RecordingProofRequest {
 	if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
 	const keys = Object.keys(value);
 	return (

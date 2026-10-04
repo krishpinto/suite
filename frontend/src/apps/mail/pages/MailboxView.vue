@@ -16,11 +16,7 @@
 				]"
 			/>
 		</div>
-		<HeaderActions
-			v-model:show-search="showSearchModal"
-			v-model:show-advanced="showSearchAdvanced"
-			v-model:edit-filter="searchEditFilter"
-		/>
+		<HeaderActions />
 	</header>
 
 	<!-- Unscreened-thread nudge on the inbox, mirroring the trash/junk info bar: shown while Hey-style
@@ -66,23 +62,19 @@
 			<ThreadPane
 				:thread-open="!!threadID"
 				@touch-start="onThreadTouchStart"
+				@touch-move="onThreadTouchMove"
 				@touch-end="onThreadTouchEnd"
 			>
 				<template #list>
 					<!-- The search view's own header: the query (click to edit) + removable filter pills, above
 					     the results toolbar. It owns the query surface; the results below just read the route. -->
-					<SearchResultsHeader
-						v-if="mailbox === 'search'"
-						v-model:show-search="showSearchModal"
-						v-model:show-advanced="showSearchAdvanced"
-						v-model:edit-filter="searchEditFilter"
-					/>
+					<SearchResultsHeader v-if="mailbox === 'search'" />
 
-					<!-- Mobile header: title row (folders · mailbox + count · search · compose) over
+					<!-- Mobile header: title row (folders · mailbox + count · search) over
 					     a toolbar row (filter selector on the left, filter/refresh pills on the
 					     right). In selection mode the toolbar row swaps to ✕ / count / Select All.
-					     Search skips both rows (SearchResultsHeader is the header there; the tab
-					     bar carries the "you are in search" cue), keeping only the selection
+					     Search skips both rows (SearchResultsHeader is the header there; no tab
+					     in the bar reads as active), keeping only the selection
 					     toolbar and the loading bar — the border goes with the rows it underlines. -->
 					<div
 						v-if="isMobile"
@@ -92,6 +84,7 @@
 						<MobileTitleHeader
 							v-if="mailbox !== 'search'"
 							with-menu
+							with-search
 							:title="mailboxName"
 							:count="threadCount ? __('{0} threads', [threadCount]) : undefined"
 						/>
@@ -197,10 +190,7 @@
 								</template>
 							</template>
 
-							<Dropdown
-								v-if="!!selections.length && !['search', 'starred'].includes(mailbox)"
-								:options="moveToOptions"
-							>
+							<Dropdown v-if="showMoveTo" :options="moveToOptions">
 								<Button variant="ghost" :tooltip="__('Move To')">
 									<template #icon>
 										<component :is="FolderInput" class="icon" />
@@ -296,8 +286,11 @@
 										:selection-mode="mobileSelectionMode"
 										:is-selected="selections.includes(row.thread.thread_id)"
 										:hide-sender="row.inStack"
+										:draggable="!isMobile && !isAllAccountsSearch"
 										:class="rowClasses(row)"
 										:data-row-key="row.key"
+										@drag-start="(e: DragEvent) => startThreadDrag(row.thread, e)"
+										@drag-end="threadDrag.end()"
 										@set-seen="(seen: boolean) => rowSetSeen(row.thread, seen)"
 										@archive-thread="rowArchive(row.thread)"
 										@trash-thread="rowTrash(row.thread)"
@@ -454,6 +447,7 @@
 </template>
 <script setup lang="ts">
 import { computed, inject, onMounted, onUnmounted, ref, useTemplateRef, watch } from 'vue'
+import { appPageMeta } from '@/utils/documentTitle'
 import { useRoute, useRouter } from 'vue-router'
 import {
 	Archive,
@@ -489,13 +483,15 @@ import {
 	raisePromiseToast,
 	raiseToast,
 	shouldIgnoreKeypress,
-	stripShortcutHint,
 } from '@/apps/mail/utils'
+import { stripShortcutHint } from '@/utils/actionLabel'
+import { commonMailboxIds } from '@/apps/mail/utils/mailboxTargets'
 import { utcDayEnd, utcDayStart } from '@/apps/mail/utils/datetime'
 import {
 	hasCursor,
 	isNavigationKey,
 	navigationOffset,
+	neighbourAfterRemoval,
 	stepFromKey,
 	useGPrefix,
 } from '@/apps/mail/utils/listNavigation'
@@ -506,7 +502,9 @@ import {
 	useScreenSize,
 	useSwipeNav,
 	useUndo,
+	useMobileSearch,
 } from '@/apps/mail/utils/composables'
+import { useThreadDrag } from '@/apps/mail/composables/useThreadDrag'
 import { useStoredFilter } from '@/apps/mail/utils/listFilter'
 import { useListRows } from '@/apps/mail/composables/useListRows'
 import {
@@ -515,7 +513,7 @@ import {
 } from '@/apps/mail/composables/usePaginatedThreads'
 import { useThreadActions } from '@/apps/mail/utils/useThreadActions'
 import { type MailboxRole, userStore } from '@/apps/mail/stores/user'
-import AdaptiveDropdown from '@/apps/mail/components/AdaptiveDropdown.vue'
+import AdaptiveDropdown from '@/components/AdaptiveDropdown.vue'
 import HeaderActions from '@/apps/mail/components/HeaderActions.vue'
 import LoadingBar from '@/apps/mail/components/LoadingBar.vue'
 import NoMails from '@/apps/mail/components/Icons/NoMails.vue'
@@ -570,6 +568,7 @@ const {
 	threadIDs,
 	threadByOffset,
 	takeResetWindow,
+	resetLimit,
 	beginReset,
 	beginRefresh,
 	onResetSuccess,
@@ -683,7 +682,7 @@ const moreSelectionOptions = computed(() => [
 		icon: a.icon,
 		onClick: a.onClick,
 	})),
-	...(!['search', 'starred'].includes(mailbox)
+	...(showMoveTo.value
 		? [{ label: __('Move To'), icon: FolderInput, onClick: () => (showMoveToSheet.value = true) }]
 		: []),
 	...(showAddTo.value
@@ -1061,7 +1060,7 @@ const shortAccountLabel = (name?: string | null) =>
 // The mobile Search tab lands on this route with no query yet. There's nothing to fetch —
 // an empty filter would run an unbounded search — so the list area shows a hint instead
 // (all_accounts is scope, not a search condition, so it alone doesn't count as a query).
-const hasSearchQuery = computed(() => Object.keys(route.query).some((k) => k !== 'all_accounts'))
+const { hasSearchQuery } = useMobileSearch()
 
 // Null while a search is pending — the count is only known once the fetch resolves (set in the
 // searchResults transform below, reset in resetThreads). Guards the title against a stale or zero count.
@@ -1076,13 +1075,14 @@ const searchFilter = () => {
 	return filter
 }
 
-// Reset resource for search: always the first window, over-fetching one row to drive `hasMore`.
+// Reset resource for search: the window starts at the top and runs as deep as the composable asks
+// (one page on a reset, the loaded list on a refresh), over-fetching one row to drive `hasMore`.
 const searchResults = createResource({
 	url: 'suite.mail.api.mail.search_mails',
 	makeParams: () => ({
 		account: store.accountId,
 		filter: searchFilter(),
-		limit: PAGE_LENGTH + 1,
+		limit: resetLimit(),
 		start: 0,
 		all_accounts: isAllAccountsSearch.value,
 	}),
@@ -1121,14 +1121,16 @@ const { filter, reloadFilter, FILTER_OPTIONS, filterTitle } = useStoredFilter({
 
 const isMailboxLoaded = ref(false)
 
-// Reset resource for a mailbox: always the first window. Over-fetches one row (PAGE_LENGTH + 1) to
-// detect whether more exist without relying on the (flaky) stored count.
+// Reset resource for a mailbox: the window starts at the top and runs as deep as the composable asks
+// (see resetLimit) — one page on a reset, the loaded list on a refresh, so a refresh can tell which
+// loaded rows are gone. Over-fetches one row to detect whether more exist without relying on the
+// (flaky) stored count.
 const threads = createResource({
 	url: 'suite.mail.api.mail.get_threads',
 	makeParams: () => ({
 		account: store.accountId,
 		mailbox,
-		limit: PAGE_LENGTH + 1,
+		limit: resetLimit(),
 		start: 0,
 		filter_by: filter.value,
 	}),
@@ -1328,6 +1330,10 @@ const pollForChanges = async () => {
 	if (mailboxObj.value?.total_emails !== prevTotal) refreshThreads(false)
 }
 
+// Mail was read, moved or deleted somewhere else (another device, another tab). Which mailboxes it
+// touched isn't known — a deleted mail can no longer be asked — so every list refreshes.
+const onMailChanged = () => refreshThreads()
+
 onMounted(() => {
 	window.addEventListener('keydown', handleKeyDown)
 	window.addEventListener('keyup', handleKeyUp)
@@ -1336,6 +1342,7 @@ onMounted(() => {
 	socket.on('new_mail_created', (updatedMailboxes: string[]) => {
 		if (updatedMailboxes.includes(mailbox)) refreshThreads()
 	})
+	socket.on('mail_changed', onMailChanged)
 
 	socket.on('mail_exchange_completed', (payload: { success: boolean; message: string }) =>
 		raiseToast(payload.message, payload.success ? 'success' : 'error'),
@@ -1350,6 +1357,7 @@ onUnmounted(() => {
 	window.removeEventListener('keydown', handleKeyDown)
 	window.removeEventListener('keyup', handleKeyUp)
 	if (reloadInterval.value) clearInterval(reloadInterval.value)
+	socket.off('mail_changed', onMailChanged)
 	// Leaving the mailbox drops any pending undo so a lingering toast can't undo into another view.
 	dropViewUndo()
 })
@@ -1370,7 +1378,11 @@ const goToThreadByOffset = (offset: number) => {
 }
 
 // Swipe on the open thread (mobile): left → next thread, right → previous.
-const { onTouchStart: onThreadTouchStart, onTouchEnd: onThreadTouchEnd } = useSwipeNav(
+const {
+	onTouchStart: onThreadTouchStart,
+	onTouchMove: onThreadTouchMove,
+	onTouchEnd: onThreadTouchEnd,
+} = useSwipeNav(
 	() => isMobile.value && !!threadID,
 	(offset) => {
 		// Arms the paging animation for this navigation only — goToThread consumes it, so
@@ -1386,9 +1398,14 @@ const { onTouchStart: onThreadTouchStart, onTouchEnd: onThreadTouchEnd } = useSw
 const threadSlide = ref('')
 let pendingThreadSlide = ''
 
+// Down the list first, then up: triaging from the oldest mail lives at the bottom, where there is
+// never anything below (see neighbourAfterRemoval). Only an emptied list falls back to the mailbox.
 const goToNextThreadOrMailbox = (excludedThreads: string[] = []) => {
-	const idx = threadIDs.value.indexOf(threadID)
-	const next = threadIDs.value.slice(idx + 1).find((id) => !excludedThreads.includes(id))
+	const next = neighbourAfterRemoval(
+		threadIDs.value,
+		threadIDs.value.indexOf(threadID),
+		(id) => !excludedThreads.includes(id),
+	)
 	if (next) goToThread(next)
 	else goToMailbox()
 }
@@ -1408,9 +1425,11 @@ const {
 	handleMailSpam,
 	handleMailDelete,
 	setFlagged,
+	selectedRows,
 	moveToOptions,
 	addToOptions,
 	removeFromOptions,
+	showMoveTo,
 	showAddTo,
 	showRemoveFrom,
 	showJunkOrDeleteThreads,
@@ -1429,6 +1448,40 @@ const {
 	goToMailbox,
 	goToNextThreadOrMailbox,
 })
+
+// ── Dragging threads onto a folder ────────────────────────────────────────────────────────────────
+// A drop is the same act as picking a folder from the "Move to" menu, so it runs the same handler —
+// undo snapshot, Junk diversion and toast included. The sidebar owns the drop; it borrows the move
+// from here, since only the view knows how to perform one.
+const threadDrag = useThreadDrag()
+
+onMounted(() => threadDrag.setMoveHandler(handleMoveThreads))
+onUnmounted(() => threadDrag.setMoveHandler(null))
+
+/**
+ * What the drag carries. Dragging a row that is part of the selection takes the
+ * whole selection with it; dragging one outside it takes that row alone and
+ * leaves the selection untouched — the same reading every file manager gives
+ * the gesture, and the alternative (always the selection) silently moves mail
+ * the reader never pointed at.
+ *
+ * Rows are undraggable in an all-accounts search, alongside `selectable`, and
+ * for the same reason: the move below runs against the active account, while
+ * those rows can belong to any. There is no cross-account handler to route to
+ * either — the ones above work by reading a role off the row's own account
+ * (`mail.archive`, `mail.trash`), and the folder being dropped on is one of
+ * *this* account's, which another account has no counterpart for.
+ */
+const startThreadDrag = (thread: Thread, e: DragEvent) => {
+	const dragged = selections.value.includes(thread.thread_id) ? selectedRows.value : [thread]
+	// The folders these rows are already in ride along, so the sidebar can rule them out as targets
+	// without holding the list itself.
+	threadDrag.start(
+		dragged.map((t) => t.thread_id),
+		commonMailboxIds(dragged),
+		e,
+	)
+}
 
 // ── Cross-account search row actions ──────────────────────────────────────────────────────────────
 // In an all-accounts search the merged rows can belong to any account, so the shared handlers above
@@ -1554,7 +1607,7 @@ const emptyMailbox = createResource({
 const emptyMailboxOptions = computed(() => ({
 	title: __('Empty {0}', [mailboxName.value]),
 	message: __(`Are you sure you want to empty the contents of this mailbox?`),
-	icon: { name: 'lucide-alert-triangle', theme: 'amber' },
+	icon: 'lucide-alert-triangle', theme: 'amber',
 	actions: [
 		{
 			label: __('Confirm'),
@@ -1588,8 +1641,8 @@ const currentThread = computed(() =>
 )
 
 usePageMeta(() => {
-	if (threadID) return { title: currentThread.value?.subject || __('[No Subject]') }
-	return { title: `${unreadThreadsPrefix.value} ${mailboxName.value}` }
+	if (threadID) return appPageMeta(currentThread.value?.subject || __('[No Subject]'), 'Mail')
+	return appPageMeta(`${unreadThreadsPrefix.value} ${mailboxName.value}`, 'Mail')
 })
 
 const title = computed(() => {
@@ -1608,13 +1661,6 @@ const title = computed(() => {
 
 	return filterTitle.value
 })
-
-// The search modal lives in HeaderActions but is opened from two places — its own button, and the
-// search view's header — so its state sits here, between them. Everything else about the query surface
-// belongs to SearchResultsHeader.
-const showSearchModal = ref(false)
-const showSearchAdvanced = ref(false)
-const searchEditFilter = ref('')
 
 const threadCount = computed(() => {
 	const count = mailboxObj.value?.total_threads

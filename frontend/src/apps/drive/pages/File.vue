@@ -43,11 +43,12 @@ import {
   clearCrumbEntity,
 } from '@/apps/drive/data/breadcrumbs'
 import Navbar from '@/apps/drive/components/Navbar.vue'
-import { ref, computed, onMounted, onUnmounted, defineProps } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { Button } from 'frappe-ui'
 import FileRender from '@/apps/drive/components/FileRender.vue'
 import FilePreviewSkeleton from '@/apps/drive/components/FileTypePreview/FilePreviewSkeleton.vue'
 import { createResource } from 'frappe-ui'
+import { appDocumentTitle } from '@/utils/documentTitle'
 import { useRouter } from 'vue-router'
 import LucideScan from '~icons/lucide/scan'
 import { onKeyStroke } from '@vueuse/core'
@@ -107,9 +108,10 @@ onKeyStroke('ArrowRight', (e) => {
 const onSuccess = async (entity) => {
   // temporary hack: #475
   if (isWriterDocument(entity)) {
-    window.location.href = '/writer/w/' + entity.name
+    await router.push({ name: 'writer-document', params: { id: entity.name } })
+    return
   }
-  document.title = entity.file_name
+  document.title = appDocumentTitle(entity.file_name, 'Drive')
   setCrumbEntity(entity)
   updateURLSlug(entity.file_name)
   trackVisit.submit({ entity_name: entity.name })

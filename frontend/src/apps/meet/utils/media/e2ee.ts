@@ -65,19 +65,6 @@ function getSubtle(): SubtleCrypto {
 	return subtle;
 }
 
-export async function x25519KeyPair(): Promise<CryptoKeyPair> {
-	return getSubtle().generateKey("X25519", true, ["deriveBits"]);
-}
-
-export async function exportPublicKey(key: CryptoKey): Promise<string> {
-	const raw = await getSubtle().exportKey("raw", key);
-	return bufferToBase64(raw);
-}
-
-export async function importPublicKey(b64: string): Promise<CryptoKey> {
-	return getSubtle().importKey("raw", bytesFromBase64(b64), "X25519", true, []);
-}
-
 export async function exportEd25519PublicKey(key: CryptoKey): Promise<string> {
 	const raw = await getSubtle().exportKey("raw", key);
 	return bufferToBase64(raw);
@@ -95,41 +82,6 @@ export async function importEd25519PublicKey(b64: string): Promise<CryptoKey> {
 
 export async function ed25519KeyPair(): Promise<CryptoKeyPair> {
 	return getSubtle().generateKey("Ed25519", true, ["sign", "verify"]);
-}
-
-export async function signProof(
-	privateKey: CryptoKey,
-	payload: Uint8Array<ArrayBuffer>,
-): Promise<string> {
-	const sig = await getSubtle().sign({ name: "Ed25519" }, privateKey, payload);
-	return bufferToBase64(sig);
-}
-
-export async function verifyProof(
-	publicKey: CryptoKey,
-	payload: Uint8Array<ArrayBuffer>,
-	signatureB64: string,
-): Promise<boolean> {
-	return getSubtle().verify(
-		{ name: "Ed25519" },
-		publicKey,
-		bytesFromBase64(signatureB64),
-		payload,
-	);
-}
-
-export async function ecdhKeyAgreement(
-	localPrivate: CryptoKey,
-	remotePublic: CryptoKey,
-): Promise<Uint8Array<ArrayBuffer>> {
-	const bits = await getSubtle().deriveBits(
-		{ name: "X25519", public: remotePublic },
-		localPrivate,
-		256,
-	);
-	const out = new Uint8Array(32);
-	out.set(new Uint8Array(bits));
-	return out;
 }
 
 export async function signWithEd25519(
@@ -150,36 +102,11 @@ async function verifyWithEd25519(
 	return getSubtle().verify({ name: "Ed25519" }, publicKey, signature, data);
 }
 
-async function _hkdfBits(
-	ikm: Uint8Array<ArrayBuffer>,
-	info: Uint8Array<ArrayBuffer>,
-	length = 32,
-): Promise<Uint8Array<ArrayBuffer>> {
-	const subtle = getSubtle();
-	const baseKey = await subtle.importKey("raw", ikm, "HKDF", false, [
-		"deriveBits",
-	]);
-	const bits = await subtle.deriveBits(
-		{ name: "HKDF", hash: "SHA-256", salt: new Uint8Array(0), info },
-		baseKey,
-		length * 8,
-	);
-	const out = new Uint8Array(length);
-	out.set(new Uint8Array(bits));
-	return out;
-}
-
 export async function generateMeetingSecret(): Promise<
 	Uint8Array<ArrayBuffer>
 > {
 	return globalThis.crypto.getRandomValues(new Uint8Array(32));
 }
-
-export {
-	advanceChain,
-	chainTipToAESKey,
-	initSenderChain,
-} from "./frameCodec";
 
 export class SenderChainState {
 	readonly senderId: number;

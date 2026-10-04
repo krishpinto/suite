@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Boots a bootstrapped Stalwart server for the mail/calendar integration tests.
-# Mirrors the production sequence in suite/mail/utils/ansible/playbooks/deploy-mail-server.yml:
+# Mirrors the production sequence in the Suite Cloud app's deploy-mail-server.yml playbook:
 # start container -> wait for :8080 -> stalwart-cli apply bootstrap.ndjson -> restart -> wait.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-STALWART_VERSION="${STALWART_VERSION:-v0.16.17}"
+STALWART_VERSION="${STALWART_VERSION:-v0.16.20}"
 STALWART_CLI_VERSION="${STALWART_CLI_VERSION:-v1.0.12}"
 STALWART_ADMIN_USER="${STALWART_ADMIN_USER:-admin}"
 STALWART_ADMIN_PASSWORD="${STALWART_ADMIN_PASSWORD:-admin}"

@@ -1,6 +1,6 @@
 import router from '@/apps/drive/router'
 
-import { isHomeContext } from '@/apps/drive/data/breadcrumbs'
+import '@/apps/drive/data/breadcrumbs'
 import { currentFolder } from '@/apps/drive/data/currentFolder'
 import { formatSize } from '@/apps/drive/utils/format'
 import { nextTick } from 'vue'
@@ -14,9 +14,12 @@ import {
   getDocuments,
 } from '@/apps/drive/resources/files'
 import { set } from 'idb-keyval'
-import { toast } from '@/apps/drive/utils/toasts.js'
 import { useFileUpload, toast as nToast } from 'frappe-ui'
 import emitter from '@/apps/drive/emitter'
+import { getSessionUser } from '@/utils/session'
+import writerIcon from '@/assets/app-logos/writer.png'
+import sheetsIcon from '@/assets/app-logos/sheets.svg'
+import slidesIcon from '@/assets/app-logos/slides.svg'
 
 import folderIcon from '../../../../../suite/public/drive/images/icons/folder.svg'
 import imageIcon from '../../../../../suite/public/drive/images/icons/image.svg'
@@ -53,7 +56,7 @@ const FILE_ICONS = {
   Archive: archiveIcon,
 }
 
-export const WRITER_CONTENT_DOCTYPE = 'Writer Document'
+const WRITER_CONTENT_DOCTYPE = 'Writer Document'
 export const PRESENTATION_CONTENT_DOCTYPE = 'Presentation'
 
 export function displayFileName(file) {
@@ -66,21 +69,21 @@ export function displayFileName(file) {
     ? name
     : name.slice(0, dot)
 }
-export const SHEET_CONTENT_DOCTYPE = 'Sheet'
-export const ATTACHMENT_CONTENT_DOCTYPE = 'File'
+const SHEET_CONTENT_DOCTYPE = 'Sheet'
+const ATTACHMENT_CONTENT_DOCTYPE = 'File'
 
 export function isWriterDocument(entity) {
   return entity?.content_doctype === WRITER_CONTENT_DOCTYPE
 }
 
-export function isPresentation(entity) {
+function isPresentation(entity) {
   return entity?.content_doctype === PRESENTATION_CONTENT_DOCTYPE
 }
 
 // A native Sheets doc (its own `Sheet` doctype), distinct from an *uploaded*
 // spreadsheet (.xlsx/.csv) — both carry file_type 'Spreadsheet', so the
 // content_doctype is the only reliable discriminator.
-export function isSheet(entity) {
+function isSheet(entity) {
   return entity?.content_doctype === SHEET_CONTENT_DOCTYPE
 }
 
@@ -90,10 +93,6 @@ export function hasHostedContent(entity) {
 
 export function isManaged(entity) {
   return entity?.kind === 'native'
-}
-
-export function isReadonly(entity) {
-  return entity?.kind === 'readonly'
 }
 
 export function isAttachmentRef(entity) {
@@ -154,14 +153,20 @@ export const openEntity = (entity, new_tab = false) => {
     )
       window.open(entity.file_url, '_blank')
   } else if (isPresentation(entity)) {
-    window.location.href = '/slides/presentation/' + entity.content_docname
+    router.push({
+      name: 'slides-editor',
+      params: { presentationId: entity.content_docname },
+    })
   } else if (
     entity.file_type === 'Document' ||
     entity.file_type === 'Markdown'
   ) {
-    window.location.href = '/writer/w/' + entity.name
+    router.push({ name: 'writer-document', params: { id: entity.name } })
   } else if (isSheet(entity)) {
-    window.location.href = '/sheets/' + (entity.content_docname || entity.name)
+    router.push({
+      name: 'sheets-editor',
+      params: { id: entity.content_docname || entity.name },
+    })
   } else {
     router.push({
       name: 'drive-File',
@@ -276,13 +281,6 @@ export const sortEntities = (rows, order) => {
   return rows
 }
 
-export const groupByFolder = (entities) => {
-  return {
-    Folders: entities.filter((x) => x.is_folder === 1),
-    Files: entities.filter((x) => x.is_folder === 0),
-  }
-}
-
 export const prettyData = (entities) => {
   return entities.map((entity) => {
     entity.file_size_pretty = formatSize(entity.file_size)
@@ -296,11 +294,28 @@ export function getIconUrl(file_type) {
   return FILE_ICONS[file_type] ?? unknownIcon
 }
 
+export function getEntityIconUrl(entity) {
+  if (isWriterDocument(entity)) return writerIcon
+  if (isSheet(entity)) return sheetsIcon
+  if (isPresentation(entity)) return slidesIcon
+  return getIconUrl(entity?.is_folder ? 'Folder' : entity?.file_type)
+}
+
+function getPresentationThumbnailUrl(entity) {
+  let thumbnail = entity?.thumbnail
+  if (!thumbnail) return ''
+  if (thumbnail.startsWith('/files')) thumbnail = `/private${thumbnail}`
+  if (!thumbnail.startsWith('/private') || entity.owner === getSessionUser()) return thumbnail
+  return `/api/method/suite.slides.api.file.get_media_file?src=${encodeURIComponent(thumbnail)}&presentation=${encodeURIComponent(entity.content_docname)}`
+}
+
 // `src` is the thumbnail (images/videos/PDFs) or the icon; `fallback` is the icon.
-export function getThumbnailUrl({ name, file_type, thumbnail, external }, view = 'list') {
-  const fallback = getIconUrl(file_type ?? 'Presentation')
+export function getThumbnailUrl(entity, view = 'list') {
+  const { name, file_type, thumbnail, external } = entity
+  const fallback = getEntityIconUrl(entity)
   let src = ''
-  if (external) src = view !== 'list' ? thumbnail : ''
+  if (isPresentation(entity)) src = getPresentationThumbnailUrl(entity)
+  else if (external) src = view !== 'list' ? thumbnail : ''
   else if (['Image', 'Video', 'PDF'].includes(file_type))
     src = `/api/method/suite.drive.api.files.get_thumbnail?entity_name=${name}`
   return { src: src || fallback, fallback }
@@ -452,31 +467,6 @@ function slugger(file_name) {
     .replace(/\s+/g, '-')
 }
 
-function getLinkStem(entity) {
-  return `${
-    {
-      true: 'f',
-      [new Boolean(entity.is_folder)]: 'd',
-      [new Boolean(isWriterDocument(entity) || entity.mime_type === 'text/markdown')]: 'w',
-    }[true]
-  }/${entity.name}/${slugger(entity.file_name)}`
-}
-
-const copyToClipboard = (str) => {
-  if (navigator && navigator.clipboard && navigator.clipboard.writeText) {
-    return navigator.clipboard.writeText(str)
-  } else {
-    // Fallback to the legacy clipboard API
-    const textArea = document.createElement('textarea')
-    textArea.value = str
-    document.body.appendChild(textArea)
-    textArea.select()
-    document.execCommand('copy')
-    document.body.removeChild(textArea)
-    return Promise.resolve()
-  }
-}
-
 export async function updateURLSlug(file_name) {
   const route = router.currentRoute.value
   await nextTick()
@@ -495,49 +485,9 @@ export async function updateURLSlug(file_name) {
   }
 }
 
-export function getLink(entity, copy = true, withDomain = true) {
-  let link
-  if (entity.file_type === 'Link') link = entity.file_url
-  else if (entity.mime_type === 'frappe/slides' || isPresentation(entity)) {
-    link =
-      window.location.origin +
-      '/slides/presentation/' +
-      (entity.content_docname || entity.name)
-  } else if (
-    entity.file_type === 'Document' ||
-    entity.file_type === 'Markdown'
-  ) {
-    link = window.location.origin + '/writer/w/' + entity.name
-  } else if (entity.mime_type === 'frappe/sheet' || isSheet(entity)) {
-    link =
-      window.location.origin +
-      '/sheets/' +
-      (entity.content_docname || entity.name)
-  } else {
-    link = `${
-      withDomain ? window.location.origin : ''
-    }/drive/${getLinkStem(entity)}`
-  }
-  if (!copy) return link
-  try {
-    copyToClipboard(link).then(() => toast('Copied to your clipboard.'))
-  } catch (err) {
-    if (err.name === 'NotAllowedError') {
-      toast('Clipboard permission denied')
-    } else {
-      console.error('Failed to copy link:', err)
-    }
-  }
-}
-
 export function dynamicList(k) {
   return k.filter((a) => typeof a !== 'object' || !('cond' in a) || a.cond)
 }
-
-export const setTitle = (file_name) =>
-  (document.title =
-    (router.currentRoute.value.name === 'drive-Folder' ? 'Folder - ' : '') +
-    file_name)
 
 async function uploadImage(file, params) {
   const uploader = useFileUpload()
@@ -582,141 +532,12 @@ export const pasteObj = (e) => {
   }
 }
 
-export const FONT_FAMILIES = [
-  {
-    label: 'Caveat',
-    value: 'caveat',
-    action: (editor) =>
-      editor.chain().focus().setFontFamily('var(--font-caveat)').run(),
-    isActive: (editor) =>
-      editor.isActive('textStyle', {
-        fontFamily: 'var(--font-caveat)',
-      }),
-  },
-  {
-    label: 'Comic Sans',
-    value: 'comic-sans',
-    action: (editor) =>
-      editor.chain().focus().setFontFamily('var(--font-comic-sans)').run(),
-    isActive: (editor) =>
-      editor.isActive('textStyle', {
-        fontFamily: 'var(--font-comic-sans)',
-      }),
-  },
-  {
-    label: 'Comfortaa',
-    value: 'comfortaa',
-    action: (editor) =>
-      editor.chain().focus().setFontFamily('var(--font-comfortaa)').run(),
-    isActive: (editor) =>
-      editor.isActive('textStyle', {
-        fontFamily: 'var(--font-comfortaa)',
-      }),
-  },
-  {
-    label: 'EB Garamond',
-    value: 'eb-garamond',
-    action: (editor) =>
-      editor.chain().focus().setFontFamily('var(--font-eb-garamond)').run(),
-    isActive: (editor) =>
-      editor.isActive('textStyle', {
-        fontFamily: 'var(--font-eb-garamond)',
-      }),
-  },
-  {
-    label: 'Fantasy',
-    value: 'fantasy',
-    action: (editor) => editor.chain().focus().setFontFamily('fantasy').run(),
-    isActive: (editor) =>
-      editor.isActive('textStyle', {
-        fontFamily: 'fantasy',
-      }),
-  },
-  {
-    label: 'Geist',
-    value: 'geist',
-    action: (editor) =>
-      editor.chain().focus().setFontFamily('var(--font-geist)').run(),
-    isActive: (editor) =>
-      editor.isActive('textStyle', {
-        fontFamily: 'var(--font-geist)',
-      }),
-  },
-  {
-    label: 'IBM Plex Sans',
-    value: 'ibm-plex',
-    action: (editor) =>
-      editor.chain().focus().setFontFamily('var(--font-ibm-plex)').run(),
-    isActive: (editor) =>
-      editor.isActive('textStyle', {
-        fontFamily: 'var(--font-ibm-plex)',
-      }),
-  },
-  {
-    label: 'Inter',
-    value: 'inter',
-    action: (editor) =>
-      editor.chain().focus().setFontFamily('var(--font-inter)').run(),
-    isActive: (editor) =>
-      editor.isActive('textStyle', {
-        fontFamily: 'var(--font-inter)',
-      }),
-  },
-  {
-    label: 'JetBrains Mono',
-    value: 'jetbrains',
-    action: (editor) =>
-      editor.chain().focus().setFontFamily('var(--font-jetbrains)').run(),
-    isActive: (editor) =>
-      editor.isActive('textStyle', {
-        fontFamily: 'var(--font-jetbrains)',
-      }),
-  },
-  {
-    label: 'Lora',
-    value: 'lora',
-    action: (editor) =>
-      editor.chain().focus().setFontFamily('var(--font-lora)').run(),
-    isActive: (editor) =>
-      editor.isActive('textStyle', {
-        fontFamily: 'var(--font-lora)',
-      }),
-  },
-  {
-    label: 'Merriweather',
-    value: 'merriweather',
-    action: (editor) =>
-      editor.chain().focus().setFontFamily('var(--font-merriweather)').run(),
-    isActive: (editor) =>
-      editor.isActive('textStyle', {
-        fontFamily: 'var(--font-merriweather)',
-      }),
-  },
-  {
-    label: 'Nunito',
-    value: 'nunito',
-    action: (editor) =>
-      editor.chain().focus().setFontFamily('var(--font-nunito)').run(),
-    isActive: (editor) =>
-      editor.isActive('textStyle', {
-        fontFamily: 'var(--font-nunito)',
-      }),
-  },
-]
-
-export function getRandomColor() {
-  const letters = '0123456789ABCDEF'
-  let color = '#'
-  for (let i = 0; i < 6; i++) {
-    color += letters[Math.floor(Math.random() * 10)]
-  }
-  return color
-}
 export const newExternal = async (type) => {
   if (type === 'Presentation') {
-    window.location.href = `/slides/presentation/new?parent=${
-      currentFolder.value.name
-    }`
+    router.push({
+      name: 'slides-editor-new',
+      query: { parent: currentFolder.value.name },
+    })
     return
   }
   if (type === 'Spreadsheet') {
@@ -724,7 +545,7 @@ export const newExternal = async (type) => {
     // sheet (its after_insert backs it with the Drive File in this folder)
     // then hand off to the Sheets SPA.
     const name = await createSheet.submit({ parent: currentFolder.value.name })
-    window.location.href = '/sheets/' + name
+    router.push({ name: 'sheets-editor', params: { id: name } })
     return
   }
   const data = await createDocument.submit({
@@ -733,7 +554,7 @@ export const newExternal = async (type) => {
   prettyData([data])
   data.file_type = type
   getDocuments.data?.push?.(data)
-  window.location.href = '/writer/w/' + data.name
+  router.push({ name: 'writer-document', params: { id: data.name } })
 }
 
 export function isApple() {

@@ -49,18 +49,18 @@
 									v-else-if="column.key === 'status'"
 									class="flex w-full items-center justify-between gap-2"
 								>
-									<!-- The failure detail rides on the badge's hover title. -->
-									<span :title="deliveryErrorTitle(row) || undefined">
+									<!-- Show failure details when hovering the status badge. -->
+									<Tooltip :text="deliveryErrorTitle(row)" :disabled="!deliveryErrorTitle(row)">
 										<Badge
 											:label="undoStatusLabel(row.undo_status)"
 											:theme="undoStatusTheme(row.undo_status)"
 										/>
-									</span>
+									</Tooltip>
 									<div class="flex items-center">
 										<Button
 											v-if="!row.email_deleted && row.thread_id"
 											variant="ghost"
-											:title="__('Open email')"
+											:tooltip="__('Open email')"
 											@click.stop.prevent="openEmail(row)"
 										>
 											<template #icon>
@@ -107,6 +107,7 @@
 
 <script setup lang="ts">
 import { computed, inject, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { appPageMeta } from '@/utils/documentTitle'
 import { useRouter } from 'vue-router'
 import { useDebounceFn, watchDebounced } from '@vueuse/core'
 import { EllipsisVertical, Mail } from 'lucide-vue-next'
@@ -116,6 +117,7 @@ import {
 	Button,
 	Dialog,
 	LoadingIndicator,
+	Tooltip,
 	call,
 	createResource,
 	usePageMeta,
@@ -137,14 +139,14 @@ import {
 } from '@/apps/mail/utils/submission'
 import { useScreenSize } from '@/apps/mail/utils/composables'
 import { userStore } from '@/apps/mail/stores/user'
-import AdaptiveDropdown from '@/apps/mail/components/AdaptiveDropdown.vue'
+import AdaptiveDropdown from '@/components/AdaptiveDropdown.vue'
 import DashboardListSkeleton from '@/apps/mail/components/DashboardListSkeleton.vue'
 import HeaderActions from '@/apps/mail/components/HeaderActions.vue'
 import MobileTitleHeader from '@/apps/mail/components/mobile/MobileTitleHeader.vue'
 import OutboxFilters from '@/apps/mail/components/OutboxFilters.vue'
 import ScheduleSendModal from '@/apps/mail/components/Modals/ScheduleSendModal.vue'
 
-usePageMeta(() => ({ title: __('Outbox') }))
+usePageMeta(() => appPageMeta(__('Outbox'), 'Mail'))
 
 const store = userStore()
 const router = useRouter()
@@ -384,7 +386,6 @@ const rowOptions = (row: Submission) => {
 		reschedule: act(() => (showReschedule.value = true)),
 		cancelDelivery: act(() => (showCancel.value = true)),
 		sendAgain: act(() => (showRetry.value = true)),
-		tryAgainNow: act(() => retryNow.submit()),
 		remove: act(() => dismissMail.submit()),
 	})
 }
@@ -439,16 +440,6 @@ const retryMail = createResource({
 		showRetry.value = false
 		refresh()
 		raiseToast(__('Message sent.'))
-	},
-	onError: onActionError,
-})
-
-const retryNow = createResource({
-	url: 'suite.mail.api.scheduled.retry_delivery_now',
-	makeParams: () => ({ account: store.accountId, id: selected.value?.id }),
-	onSuccess: () => {
-		refresh()
-		raiseToast(__('Delivery attempt scheduled.'))
 	},
 	onError: onActionError,
 })
@@ -513,7 +504,7 @@ const cancelOptions = computed(() => ({
 	message: selected.value?.email_deleted
 		? __('Cancel the scheduled delivery?')
 		: __('Cancel the scheduled delivery and move the message back to Drafts?'),
-	icon: { name: 'lucide-alert-triangle', theme: 'amber' },
+	icon: 'lucide-alert-triangle', theme: 'amber',
 	actions: [
 		{
 			label: __('Confirm'),

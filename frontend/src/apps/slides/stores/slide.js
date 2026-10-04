@@ -9,7 +9,7 @@ import {
 	transformElements,
 } from '@/apps/slides/stores/presentation'
 import { flushPendingBlur, resetFocus } from '@/apps/slides/stores/element'
-import { saveChanges, dirty, saveFailed } from '@/apps/slides/stores/saving'
+import { saveWithoutDelay, dirty, saveFailed } from '@/apps/slides/stores/saving'
 import { commandHistory } from '@/apps/slides/stores/historyMeta'
 import { cloneObj } from '@/apps/slides/utils/helpers'
 import { remapElementIds } from '@/apps/slides/utils/connectors'
@@ -80,12 +80,13 @@ const getNewSlide = (toDuplicate = false, layoutObject, source = currentSlide.va
 	}
 
 	// override metadata and generate unique IDs for elements
-	slide.name = ''
 	slide.clientId = uuid4()
 	slide.parent = presentationId.value
-	slide.fadeUnmatchedElements = 1
-	slide.transitionDuration = 0
-	slide.transition = 'None'
+	if (!toDuplicate) {
+		slide.fadeUnmatchedElements = 1
+		slide.transitionDuration = 0
+		slide.transition = 'None'
+	}
 
 	return slide
 }
@@ -125,7 +126,7 @@ const resetAndSave = async () => {
 		error: () => 'Could not save presentation. Please try again.',
 	}
 	toast.promise(
-		saveChanges().then(() => {
+		saveWithoutDelay().then(() => {
 			if (saveFailed.value) throw new Error('Save failed')
 		}),
 		toastProps,
@@ -142,20 +143,24 @@ const deleteSlide = (deleteActive, index) => {
 	if (deleteIndex == null && deleteActive) deleteIndex = slideIndex.value
 	if (deleteIndex == null) return
 
+	flushPendingBlur()
+	resetFocus()
+
 	// if there is only one slide, reset the slide state instead of deleting
 	const totalLength = slides.value.length
 
 	if (totalLength == 1) {
 		// clearing the only slide's contents must go through history so it stays undoable
 		const slide = slides.value[0]
-		commandHistory.execute(
-			editSlideCommand({
-				slideId: slide.clientId,
-				property: 'elements',
-				oldValue: cloneObj(slide.elements),
-				newValue: [],
-			}),
-		)
+		if (slide.elements.length)
+			commandHistory.execute(
+				editSlideCommand({
+					slideId: slide.clientId,
+					property: 'elements',
+					oldValue: cloneObj(slide.elements),
+					newValue: [],
+				}),
+			)
 		focusedSlide.value = null
 		return
 	}

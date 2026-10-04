@@ -8,12 +8,15 @@ export default defineConfig({
 	resolve: {
 		alias: {
 			"@": path.resolve(__dirname, "src"),
+			// More specific first: a bare "frappe-ui" alias also matches "frappe-ui/…" imports.
+			"frappe-ui/experimental": path.resolve(__dirname, "src/test/frappe-ui-experimental-stub.ts"),
 			"frappe-ui": path.resolve(__dirname, "recorder/frappeUi.ts"),
 			"~icons/lucide/scan": path.resolve(__dirname, "src/test/icon-stub.ts"),
 			"~icons/lucide/chevron-down": path.resolve(__dirname, "src/test/icon-stub.ts"),
 			"~icons/lucide/clock": path.resolve(__dirname, "src/test/icon-stub.ts"),
 			"~icons/lucide/download": path.resolve(__dirname, "src/test/icon-stub.ts"),
 			"~icons/lucide/external-link": path.resolve(__dirname, "src/test/icon-stub.ts"),
+			"~icons/lucide/square-arrow-out-up-right": path.resolve(__dirname, "src/test/icon-stub.ts"),
 			"~icons/lucide/eye": path.resolve(__dirname, "src/test/icon-stub.ts"),
 			"~icons/lucide/info": path.resolve(__dirname, "src/test/icon-stub.ts"),
 			"~icons/lucide/link-2": path.resolve(__dirname, "src/test/icon-stub.ts"),

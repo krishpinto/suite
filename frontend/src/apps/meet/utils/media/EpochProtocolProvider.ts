@@ -6,7 +6,6 @@ import {
 	defaultCapabilities,
 	defaultLifetime,
 	emptyPskIndex,
-	encodeGroupState,
 	generateKeyPackage,
 	getCiphersuiteFromName,
 	getCiphersuiteImpl,
@@ -39,18 +38,12 @@ type EpochMemberInput = {
 type EpochStateResult = {
 	epochNumber: number;
 	state: ClientState;
-	encodedState: Uint8Array;
 	meetingSecret: Uint8Array<ArrayBuffer>;
 };
 
 type EpochKeyPackage = {
 	publicPackage: KeyPackage;
 	privatePackage: PrivateKeyPackage;
-};
-
-type AddMemberResult = EpochStateResult & {
-	commit: MLSMessage;
-	welcome: Welcome;
 };
 
 type AddMultipleMembersResult = {
@@ -64,30 +57,14 @@ type RemoveMemberResult = {
 	epoch: EpochStateResult;
 };
 
-type CreateGenesisWithMembersResult = EpochStateResult & {
-	joiningMembers: EpochMemberInput[];
-	welcome: Welcome;
-};
-
 export interface EpochProtocolProvider {
 	createGenesisEpoch(input: EpochMemberInput): Promise<EpochStateResult>;
-	createGenesisEpochWithMembers(
-		creator: EpochMemberInput,
-		joiningMembers: Array<{
-			member: EpochMemberInput;
-			keyPackage: EpochKeyPackage;
-		}>,
-	): Promise<CreateGenesisWithMembersResult>;
 	generateKeyPackage(input: EpochMemberInput): Promise<EpochKeyPackage>;
 	encodeKeyPackage(keyPackage: KeyPackage): Uint8Array;
 	decodeKeyPackage(encoded: Uint8Array): KeyPackage;
 	encodeCommit(commit: MLSMessage): Uint8Array;
 	encodeWelcome(welcome: Welcome): Uint8Array;
 	decodeWelcome(encoded: Uint8Array): Welcome;
-	addMember(
-		state: ClientState,
-		joiningMember: KeyPackage,
-	): Promise<AddMemberResult>;
 	addMultipleMembers(
 		state: ClientState,
 		joiningMembers: KeyPackage[],
@@ -121,53 +98,6 @@ export class TsMlsEpochProtocolProvider implements EpochProtocolProvider {
 			cipherSuite,
 		);
 		return this.buildStateResult(state);
-	}
-
-	async createGenesisEpochWithMembers(
-		creator: EpochMemberInput,
-		joiningMembers: Array<{
-			member: EpochMemberInput;
-			keyPackage: EpochKeyPackage;
-		}>,
-	): Promise<CreateGenesisWithMembersResult> {
-		if (joiningMembers.length === 0) {
-			throw new Error(
-				"createGenesisEpochWithMembers requires at least one joining member",
-			);
-		}
-		const cipherSuite = await this.getCipherSuite();
-		const creatorKeyPackage = await this.generateKeyPackage(creator);
-		const addProposals: Proposal[] = joiningMembers.map((jm) => ({
-			proposalType: "add",
-			add: { keyPackage: jm.keyPackage.publicPackage },
-		}));
-		const state = await createGroup(
-			new TextEncoder().encode(creator.groupId),
-			creatorKeyPackage.publicPackage,
-			creatorKeyPackage.privatePackage,
-			[],
-			cipherSuite,
-		);
-		const commit = await createCommit(
-			{ state, cipherSuite },
-			{
-				extraProposals: addProposals,
-				ratchetTreeExtension: true,
-				wireAsPublicMessage: true,
-			},
-		);
-		commit.consumed.forEach(zeroOutUint8Array);
-		if (!commit.welcome) {
-			throw new Error(
-				"createGenesisEpochWithMembers did not produce a welcome",
-			);
-		}
-		const nextEpoch = await this.buildStateResult(commit.newState);
-		return {
-			...nextEpoch,
-			joiningMembers: joiningMembers.map((jm) => jm.member),
-			welcome: commit.welcome,
-		};
 	}
 
 	async generateKeyPackage(input: EpochMemberInput): Promise<EpochKeyPackage> {
@@ -207,18 +137,6 @@ export class TsMlsEpochProtocolProvider implements EpochProtocolProvider {
 			throw new Error("Invalid MLS welcome");
 		}
 		return decoded[0];
-	}
-
-	async addMember(
-		state: ClientState,
-		joiningMember: KeyPackage,
-	): Promise<AddMemberResult> {
-		const result = await this.addMultipleMembers(state, [joiningMember]);
-		return {
-			...result.epoch,
-			commit: result.commit,
-			welcome: result.welcome,
-		};
 	}
 
 	async addMultipleMembers(
@@ -337,7 +255,6 @@ export class TsMlsEpochProtocolProvider implements EpochProtocolProvider {
 		return {
 			epochNumber: this.getMeetEpochNumber(state),
 			state,
-			encodedState: encodeGroupState(state),
 			meetingSecret: await this.exportMeetingSecret(state),
 		};
 	}

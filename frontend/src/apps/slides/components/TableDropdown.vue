@@ -2,7 +2,7 @@
 	<Popover side="top" align="center" :offset="12">
 		<template #trigger="{ open }">
 			<div>
-				<Tooltip text="Table" :hover-delay="0.7">
+				<Tooltip text="Table" :hover-delay="700">
 					<div :class="triggerClass(open)">
 						<Table class="size-4 stroke-[1.5] text-ink-gray-7" />
 						<ChevronDown class="size-3 text-ink-gray-5" />
@@ -41,7 +41,7 @@ import { Table, ChevronDown } from 'lucide-vue-next'
 
 import { Popover, Tooltip } from 'frappe-ui'
 
-import { addTableElement } from '@/apps/slides/stores/element'
+import { addTableElement, getEmptyTableCells } from '@/apps/slides/stores/element'
 
 const maxRows = 6
 const maxColumns = 8
@@ -64,6 +64,6 @@ const resetHovered = () => {
 const insertTable = (rows, columns, close) => {
 	close()
 	resetHovered()
-	addTableElement(rows, columns)
+	addTableElement(getEmptyTableCells(rows, columns))
 }
 </script>

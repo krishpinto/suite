@@ -9,9 +9,11 @@ import string
 import uuid
 
 import frappe
+from frappe import _
 from frappe.core.doctype.file.file import get_local_image
 from frappe.model.document import Document
 from frappe.query_builder.functions import Count
+from frappe.utils import cstr, flt
 
 from suite.drive.api.permissions import user_has_permission
 from suite.drive.overrides.file import File as DriveFile
@@ -26,6 +28,8 @@ class Presentation(Document):
         self.slug = slug(self.title)
 
     def validate(self):
+        self.validate_advance_after()
+
         if self.is_composite:
             if not self.reference_presentations:
                 frappe.throw(
@@ -38,6 +42,20 @@ class Presentation(Document):
                     frappe.throw(
                         f"Reference presentation '{ref_doc.title}' must be public to create a composite presentation."
                     )
+
+    def validate_advance_after(self):
+        for row in self.slides:
+            if row.advance_after in (None, ""):
+                continue
+            if (
+                not re.fullmatch(r"[0-9]+(\.[0-9]+)?", cstr(row.advance_after))
+                or not 1 <= flt(row.advance_after) <= 3600
+            ):
+                frappe.throw(
+                    _("Slide {0}: Advance After must be between 1 and 3600 seconds, not {1}").format(
+                        row.idx, row.advance_after
+                    )
+                )
 
     def after_insert(self):
         if self.is_template:
@@ -432,13 +450,24 @@ def delete_presentation(name: str):
     return frappe.delete_doc("Presentation", name)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def update_title(name: str, title: str):
     presentation = frappe.get_doc("Presentation", name)
     presentation.check_permission("write")
+    base_modified = presentation.modified
     presentation.title = title
     presentation.save()
-    return {"slug": slug(title), "modified": presentation.modified}
+    return {"slug": slug(title), "modified": presentation.modified, "base_modified": base_modified}
+
+
+@frappe.whitelist(methods=["POST"])
+def update_theme(name: str, theme: str):
+    presentation = frappe.get_doc("Presentation", name)
+    presentation.check_permission("write")
+    base_modified = presentation.modified
+    presentation.theme = theme
+    presentation.save()
+    return {"modified": presentation.modified, "base_modified": base_modified}
 
 
 def get_attachment(presentation, file_url):

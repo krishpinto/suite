@@ -29,7 +29,6 @@ interface TileController {
 	forceNext: boolean;
 	lastSent: TileMetrics | null;
 	debouncedUpdate: (() => void) | null;
-	initialPending: boolean;
 	stopListeningForConsumer: (() => void) | null;
 }
 
@@ -58,6 +57,18 @@ export function useTileAdaptiveStreaming() {
 		return injectedManager.value;
 	}
 
+	function measureTile(
+		element: HTMLVideoElement,
+		target: Pick<TileController, "width" | "height" | "visible">,
+	) {
+		const width = Math.max(element.clientWidth || 0, 0);
+		const height = Math.max(element.clientHeight || 0, 0);
+		target.width = width;
+		target.height = height;
+		target.visible =
+			width > 0 && height > 0 && isElementInViewport(element);
+	}
+
 	async function updateConsumerPreferences(controller: TileController) {
 		if (!controller.active) return;
 		const manager = getManager();
@@ -70,15 +81,6 @@ export function useTileAdaptiveStreaming() {
 			controller.visible && controller.width > 0 && controller.height > 0;
 		const width = visible ? Math.round(controller.width) : 0;
 		const height = visible ? Math.round(controller.height) : 0;
-
-		// Don't send initial update without valid dimensions
-		// else we'll get a paused stream
-		if (
-			controller.initialPending &&
-			(!visible || width === 0 || height === 0)
-		) {
-			return;
-		}
 
 		const last = controller.lastSent;
 		const widthChanged =
@@ -101,9 +103,6 @@ export function useTileAdaptiveStreaming() {
 			});
 			if (!controller.active || getManager() !== manager) return;
 			controller.lastSent = { visible, width, height };
-			if (controller.initialPending) {
-				controller.initialPending = false;
-			}
 		} catch (error) {
 			console.warn(
 				"Failed to update consumer preferences for",
@@ -121,6 +120,10 @@ export function useTileAdaptiveStreaming() {
 		} else if (controller.debouncedUpdate) {
 			controller.debouncedUpdate();
 		}
+	}
+
+	function scheduleRefresh(controller: TileController) {
+		scheduleUpdate(controller, controller.lastSent == null);
 	}
 
 	function cleanupController(controller: TileController) {
@@ -144,7 +147,7 @@ export function useTileAdaptiveStreaming() {
 			(event: Event) => {
 				const customEvent = event as CustomEvent;
 				if (customEvent.detail?.participantId === controller.participantId) {
-					scheduleUpdate(controller, false);
+					scheduleRefresh(controller);
 				}
 			},
 		);
@@ -157,16 +160,16 @@ export function useTileAdaptiveStreaming() {
 			element,
 			resizeObserver: null,
 			intersectionObserver: null,
-			// Initialize with 0x0 so ResizeObserver always detects a size change
 			width: 0,
 			height: 0,
 			visible: false,
 			forceNext: true,
-			initialPending: true,
 			lastSent: null,
 			debouncedUpdate: null,
 			stopListeningForConsumer: null,
 		};
+
+		measureTile(element, controller);
 
 		controller.debouncedUpdate = debounce(() => {
 			void updateConsumerPreferences(controller);
@@ -186,8 +189,10 @@ export function useTileAdaptiveStreaming() {
 			// Update visibility check when dimensions become valid
 			if (newWidth > 0 && newHeight > 0) {
 				controller.visible = isElementInViewport(element);
+			} else {
+				controller.visible = false;
 			}
-			scheduleUpdate(controller, controller.initialPending);
+			scheduleRefresh(controller);
 		});
 		controller.resizeObserver.observe(element);
 
@@ -199,21 +204,19 @@ export function useTileAdaptiveStreaming() {
 				entry.isIntersecting && entry.intersectionRatio >= VISIBILITY_THRESHOLD;
 			if (controller.visible !== isVisible) {
 				controller.visible = isVisible;
-				scheduleUpdate(controller, controller.initialPending || isVisible);
+				scheduleUpdate(
+					controller,
+					controller.lastSent == null || isVisible,
+				);
 			} else if (isVisible) {
-				scheduleUpdate(controller, controller.initialPending);
+				scheduleRefresh(controller);
 			}
-		});
+		}, { threshold: VISIBILITY_THRESHOLD });
 		controller.intersectionObserver.observe(element);
 
 		const onLoadedMetadata = () => {
-			controller.width = Math.max(element.clientWidth || 0, 0);
-			controller.height = Math.max(element.clientHeight || 0, 0);
-			// Update visibility check when metadata loads
-			if (controller.width > 0 && controller.height > 0) {
-				controller.visible = isElementInViewport(element);
-			}
-			scheduleUpdate(controller, controller.initialPending);
+			measureTile(element, controller);
+			scheduleRefresh(controller);
 		};
 
 		if (element.readyState >= 1) {
@@ -222,6 +225,18 @@ export function useTileAdaptiveStreaming() {
 			element.addEventListener("loadedmetadata", onLoadedMetadata, {
 				once: true,
 			});
+		}
+
+		const sendInitialState = () => {
+			if (!controller.active || controller.lastSent != null) return;
+			measureTile(element, controller);
+			controller.forceNext = true;
+			void updateConsumerPreferences(controller);
+		};
+		if (typeof requestAnimationFrame === "function") {
+			requestAnimationFrame(sendInitialState);
+		} else {
+			setTimeout(sendInitialState, 0);
 		}
 
 		return controller;

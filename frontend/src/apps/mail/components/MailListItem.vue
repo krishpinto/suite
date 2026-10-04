@@ -13,9 +13,12 @@
 		:subject-italic="!mail.subject"
 		:preview-italic="!mail.preview"
 		:account-label="accountLabel"
+		:draggable
 		@set-selected="(selected: boolean) => emit('setSelected', selected)"
+		@drag-start="(e: DragEvent) => emit('dragStart', e)"
+		@drag-end="emit('dragEnd')"
 	>
-		<template #sender><span v-html="highlight(header)" /></template>
+		<template #sender><HighlightedText :text="header" :term="searchTerm" /></template>
 
 		<template #badges>
 			<!-- How many messages the thread holds — only worth saying once it holds more than one. -->
@@ -29,9 +32,11 @@
 			<Badge v-if="mail.draft" size="sm" :label="__('Draft')" theme="red" />
 		</template>
 
-		<template #subject><span v-html="highlight(mail.subject || __('[No subject]'))" /></template>
+		<template #subject>
+			<HighlightedText :text="mail.subject || __('[No subject]')" :term="searchTerm" />
+		</template>
 		<template #preview>
-			<span v-html="highlight(mail.preview || __('— No message body —'))" />
+			<HighlightedText :text="mail.preview || __('— No message body —')" :term="searchTerm" />
 		</template>
 
 		<template #trailing="{ isHovered }">
@@ -164,6 +169,7 @@ import { userStore } from '@/apps/mail/stores/user'
 import AttachmentCapsule from '@/apps/mail/components/AttachmentCapsule.vue'
 import AttachmentViewer from '@/apps/mail/components/AttachmentViewer.vue'
 import MailRow from '@/apps/mail/components/MailRow.vue'
+import HighlightedText from '@/components/HighlightedText.vue'
 import MailRowActions from '@/apps/mail/components/MailRowActions.vue'
 
 import type { Attachment, Thread } from '@/apps/mail/types'
@@ -192,6 +198,9 @@ const {
 	selectable?: boolean
 	// Set on the members of an expanded stack, whose stack row already names the sender.
 	hideSender?: boolean
+	// Whether the row can be dragged onto a folder; the view decides, since only it
+	// knows whether a selection is riding along.
+	draggable?: boolean
 	// Mobile selection mode — forwarded to MailRow.
 	selectionMode?: boolean
 	// Which route the row links to. All Inboxes points at its own thread route so opening a
@@ -208,6 +217,8 @@ const emit = defineEmits([
 	'deleteThread',
 	'setFlagged',
 	'setSelected',
+	'dragStart',
+	'dragEnd',
 ])
 
 const route = useRoute()
@@ -264,26 +275,10 @@ const messageCount = computed(() => mail.messages?.length ?? 0)
 
 const avatarLabel = computed(() => threadAvatarLabel(participants.value, mail))
 
-// In search results, highlight the matched query term. Escape the text first (so any markup in the
-// content is neutralized), then wrap matches in <mark> — the only HTML we inject — for safe v-html.
+// In search results, the words the row was found by are marked.
 const searchTerm = computed(() =>
 	mailbox === 'search' ? ((route.query.text as string) || '').trim() : '',
 )
-const escapeHtml = (s: string) =>
-	s.replace(
-		/[&<>"']/g,
-		(c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] ?? c,
-	)
-const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-const highlight = (text?: string) => {
-	const escaped = escapeHtml(text ?? '')
-	const term = searchTerm.value
-	if (!term) return escaped
-	return escaped.replace(
-		new RegExp(`(${escapeRegExp(escapeHtml(term))})`, 'gi'),
-		'<mark class="bg-surface-yellow-5 text-ink-gray-8">$1</mark>',
-	)
-}
 
 const showAttachmentViewer = ref(false)
 const attachmentIndex = ref(0)

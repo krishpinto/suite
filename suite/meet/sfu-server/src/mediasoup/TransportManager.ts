@@ -211,6 +211,18 @@ export class TransportManager {
 		return this.transports.size;
 	}
 
+	getTransportCountsByWorker(
+		roomWorkerIds: Map<string, number>,
+	): Map<number, number> {
+		const counts = new Map<number, number>();
+		for (const data of this.transports.values()) {
+			const workerId = roomWorkerIds.get(data.roomId);
+			if (workerId === undefined) continue;
+			counts.set(workerId, (counts.get(workerId) ?? 0) + 1);
+		}
+		return counts;
+	}
+
 	closePeerTransports(roomId: string, peerId: string): void {
 		for (const direction of ['send', 'recv'] as const) {
 			const key = `${roomId}:${peerId}:${direction}`;

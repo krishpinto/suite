@@ -1,6 +1,9 @@
 import { dialog, toast } from "frappe-ui";
 import { onUnmounted, type Ref, ref, watch } from "vue";
-import { autoFramingPaused } from "../data/backgroundEffects";
+import {
+	autoFramingPaused,
+	readBackgroundEffectPreferences,
+} from "../data/backgroundEffects";
 import {
 	cameraEnabled as prefCameraEnabled,
 	micEnabled as prefMicEnabled,
@@ -17,7 +20,6 @@ import {
 import type { DeviceType, deviceManager } from "../utils/media/DeviceManager";
 import {
 	LocalCaptureSession,
-	type LocalCaptureKindPublicationResult,
 	type LocalCaptureOperation,
 	type MediaDeviceOverrides,
 } from "../utils/media/LocalCaptureSession";
@@ -42,33 +44,16 @@ function getCameraVideoConstraints(): MediaTrackConstraints {
 	}
 
 	return {
-		width: { ideal: 1280, min: 960 },
-		height: { ideal: 720, min: 540 },
+		width: { ideal: 1280 },
+		height: { ideal: 720 },
 		frameRate: { ideal: 30, max: 30 },
 	};
 }
 
 function getBackgroundEffectsFromStorage() {
-	const blurEnabled = localStorage.getItem("backgroundEffects.blur") === "1";
-	const imageEnabled = localStorage.getItem("backgroundEffects.image") === "1";
-	const autoFramingEnabled =
-		localStorage.getItem("backgroundEffects.autoFraming") === "1";
-	const selectedImage =
-		localStorage.getItem("backgroundEffects.imageName") || "";
-	const blurIntensity = Number.parseInt(
-		localStorage.getItem("backgroundEffects.blurIntensity") || "12",
-		10,
-	);
-	const anyEnabled = blurEnabled || imageEnabled || autoFramingEnabled;
-
 	return {
-		blurEnabled,
-		imageEnabled,
-		selectedImage,
-		blurIntensity,
-		autoFramingEnabled,
+		...readBackgroundEffectPreferences(12),
 		autoFramingPaused: autoFramingPaused.value,
-		anyEnabled,
 	};
 }
 
@@ -95,23 +80,6 @@ interface NoiseCancellationAPI {
 	error: Ref<string | null>;
 }
 
-type ToastAPI = Pick<typeof toast, "success" | "error" | "warning" | "create">;
-
-interface MediaPreferencesAPI {
-	micEnabled: Ref<boolean>;
-	cameraEnabled: Ref<boolean>;
-	selectedCameraId: Ref<string>;
-	selectedMicId: Ref<string>;
-	selectedSpeakerId: Ref<string>;
-	pushToTalkEnabled: Ref<boolean>;
-	noiseCancellationEnabled: Ref<boolean>;
-	setMicEnabled: (v: boolean) => void;
-	setCameraEnabled: (v: boolean) => void;
-	setSelectedCameraId: (v: string) => void;
-	setSelectedMicId: (v: string) => void;
-	setSelectedSpeakerId: (v: string) => void;
-}
-
 interface MediaControlsDeps {
 	mediaState: MediaState;
 	connectionState: ConnectionState;
@@ -123,8 +91,6 @@ interface MediaControlsDeps {
 	deviceManager: typeof deviceManager;
 	backgroundEffects: BackgroundEffectsAPI;
 	noiseCancellation: NoiseCancellationAPI;
-	toast: ToastAPI;
-	mediaPreferences: MediaPreferencesAPI;
 }
 
 interface MediaControlsAPI {
@@ -157,7 +123,7 @@ interface MediaControlsAPI {
 type ScreenShareStopReason =
 	"user-click" | "track-ended" | "publish-failed" | "cleanup";
 
-export interface E2EEMediaRepublishDetail {
+interface E2EEMediaRepublishDetail {
 	needsCamera?: boolean;
 	needsMicrophone?: boolean;
 }
@@ -357,93 +323,7 @@ export function useMediaControls(deps: MediaControlsDeps): MediaControlsAPI {
 			publish: async (stream, options) => {
 				const manager = sfuManager.value;
 				if (!manager) return {};
-				const requestedVideoTrack = options.publishVideo
-					? (stream
-							.getVideoTracks()
-							.find((track) => track.readyState === "live") ?? null)
-					: null;
-				const requestedAudioTrack = options.publishAudio
-					? (stream
-							.getAudioTracks()
-							.find((track) => track.readyState === "live") ?? null)
-					: null;
-				const publication = (await manager.publishMedia(stream, options)) ?? {};
-				const producerMatches = (
-					producer: { track?: MediaStreamTrack | null } | null,
-					track: MediaStreamTrack,
-				) =>
-					producer?.track?.readyState === "live" &&
-					(producer.track === track || producer.track.id === track.id);
-				const ensurePublished = async (
-					kind: "video" | "audio",
-					track: MediaStreamTrack | null,
-				): Promise<LocalCaptureKindPublicationResult> => {
-					if (!track) {
-						return {
-							status: "failed",
-							error: new Error(
-								`No live ${kind} track was requested for publication`,
-							),
-						};
-					}
-					const producer = manager.getLocalProducerState(kind);
-					if (!producerMatches(producer, track)) {
-						try {
-							await manager.reconcileLocalProducerTrack(
-								kind,
-								track,
-								kind === "audio" ? { resume: true } : {},
-							);
-						} catch (error) {
-							return { status: "failed", error };
-						}
-					}
-					const currentProducer = manager.getLocalProducerState(kind);
-					if (!currentProducer) {
-						return {
-							status: "failed",
-							error: new Error(
-								`${kind === "video" ? "Video" : "Audio"} publication did not create a producer`,
-							),
-						};
-					}
-					return producerMatches(currentProducer, track)
-						? { status: "published" }
-						: {
-								status: "failed",
-								error: new Error(
-									`${kind === "video" ? "Video" : "Audio"} publication did not publish the requested track`,
-								),
-							};
-				};
-				return {
-					...(options.publishVideo
-						? {
-								video: Object.hasOwn(publication, "videoError")
-									? {
-											status: "failed" as const,
-											error: publication.videoError,
-										}
-									: await ensurePublished(
-											"video",
-											requestedVideoTrack,
-										),
-							}
-						: {}),
-					...(options.publishAudio
-						? {
-								audio: Object.hasOwn(publication, "audioError")
-									? {
-											status: "failed" as const,
-											error: publication.audioError,
-										}
-									: await ensurePublished(
-											"audio",
-											requestedAudioTrack,
-										),
-							}
-						: {}),
-				};
+				return manager.publishMedia(stream, options);
 			},
 		},
 		getLocalStream: () => mediaState.localStream,

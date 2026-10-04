@@ -54,4 +54,56 @@ describe('calendar datetime helpers', () => {
 		expect(formatDateTime(null)).toBe('')
 		expect(fromWallClock('')).toBe('')
 	})
+
+	describe('shiftedMasterStart', () => {
+		// The series anchors on Sep 7; the reader has the Sep 14 occurrence open.
+		const master = '2026-09-07T15:00:00'
+		const opened = dayjs('2026-09-14T15:00:00')
+
+		it('leaves the anchor where it is when the time was not touched', async () => {
+			const { shiftedMasterStart } = await load()
+			expect(shiftedMasterStart(master, opened, dayjs('2026-09-14T15:00:00'))).toBe(master)
+		})
+
+		it('moves the series by what the reader changed, not to the occurrence', async () => {
+			const { shiftedMasterStart } = await load()
+			// 3 PM to 5 PM on the occurrence: the anchor keeps its own date and moves two hours.
+			expect(shiftedMasterStart(master, opened, dayjs('2026-09-14T17:00:00'))).toBe(
+				'2026-09-07T17:00:00',
+			)
+			// And backwards, across midnight into the previous day.
+			expect(shiftedMasterStart(master, opened, dayjs('2026-09-13T23:00:00'))).toBe(
+				'2026-09-06T23:00:00',
+			)
+		})
+
+		it('carries a date change through as the same shift', async () => {
+			const { shiftedMasterStart } = await load()
+			// Dragged a day later and an hour earlier: the whole series follows.
+			expect(shiftedMasterStart(master, opened, dayjs('2026-09-15T14:00:00'))).toBe(
+				'2026-09-08T14:00:00',
+			)
+		})
+
+		it('adds to the anchor in wall-clock time, whatever the date it lands on does', async () => {
+			const { shiftedMasterStart } = await load()
+			// An anchor sitting on the morning Europe/Vienna springs forward. An hour asked for is
+			// an hour given: the master is a clock face in its own zone, not an instant here.
+			expect(shiftedMasterStart('2026-03-29T01:30:00', opened, dayjs('2026-09-14T16:00:00'))).toBe(
+				'2026-03-29T02:30:00',
+			)
+		})
+
+		it('measures the edit in wall-clock time too, across a DST boundary', async () => {
+			const { shiftedMasterStart } = await load()
+			// Europe/Vienna falls back on 2026-10-25, so 10:00 on the 18th and 10:00 on the 25th are
+			// seven days apart on the calendar and seven days *and an hour* apart in elapsed time.
+			// The reader moved the occurrence a week, and a week is what the series moves.
+			const before = dayjs.tz('2026-10-18T10:00:00', 'Europe/Vienna')
+			const after = dayjs.tz('2026-10-25T10:00:00', 'Europe/Vienna')
+			expect(shiftedMasterStart('2026-09-07T15:00:00', before, after)).toBe('2026-09-14T15:00:00')
+			// And the other way: back a week is back a week, not an hour short of it.
+			expect(shiftedMasterStart('2026-09-14T15:00:00', after, before)).toBe('2026-09-07T15:00:00')
+		})
+	})
 })

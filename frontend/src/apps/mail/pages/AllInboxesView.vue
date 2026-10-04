@@ -1,7 +1,7 @@
 <template>
 	<!-- Mobile title header — no thread count since the merged view has no total.
 	     The toolbar below carries the bottom border, matching the mailbox structure. -->
-	<MobileTitleHeader v-if="isMobile" with-menu :title="__('All Inboxes')" />
+	<MobileTitleHeader v-if="isMobile" with-menu with-search :title="__('All Inboxes')" />
 
 	<!-- Header -->
 	<!-- hidden on mobile: the tab bar's morphing Mail tab carries the folder name, and
@@ -31,6 +31,7 @@
 			<ThreadPane
 				:thread-open="!!threadID"
 				@touch-start="onThreadTouchStart"
+				@touch-move="onThreadTouchMove"
 				@touch-end="onThreadTouchEnd"
 			>
 				<template #list>
@@ -124,7 +125,7 @@
 					:account="openRow?.account"
 					:mailbox="openRow?.inbox || ''"
 					:thread-i-d="threadID"
-					:threads="threadIDs"
+					:threads="headerThreadIDs"
 					:can-go-next="canGoNext"
 					:messages="openRow?.messages"
 					@reload-mails="reloadPaneThread()"
@@ -170,6 +171,7 @@
 
 <script setup lang="ts">
 import { computed, inject, onMounted, onUnmounted, ref, useTemplateRef, watch } from 'vue'
+import { appPageMeta } from '@/utils/documentTitle'
 import { useRoute, useRouter } from 'vue-router'
 import { LoaderCircle, RefreshCw } from 'lucide-vue-next'
 import { Breadcrumbs, Button, call, createResource, usePageMeta } from 'frappe-ui'
@@ -184,11 +186,13 @@ import {
 	hasCursor,
 	isNavigationKey,
 	navigationOffset,
+	neighbourAfterRemoval,
 	stepFromKey,
 	useGPrefix,
 } from '@/apps/mail/utils/listNavigation'
 import { useStoredFilter } from '@/apps/mail/utils/listFilter'
 import { useAccountScope } from '@/apps/mail/utils/accountScope'
+import { mailCopyIds, rowMailIds } from '@/apps/mail/utils/mailCopies'
 import { useListReload, useUndo, useScreenSize, useSwipeNav } from '@/apps/mail/utils/composables'
 import { closeComposeWindowFor } from '@/apps/mail/composables/useComposeWindow'
 import { useListRows } from '@/apps/mail/composables/useListRows'
@@ -213,13 +217,14 @@ import type { Mail, Mailbox, MailboxData, Thread, UserResource } from '@/apps/ma
 const { isMobile } = useScreenSize()
 const { listReloadRequest } = useListReload()
 
-// The `mail-all-inboxes-mail` route also carries the open thread's owning accountId and mailbox, but
-// nothing here reads them: every row already carries its own account and folder ids, which is what the
-// pane and its actions target. They fall through as plain attributes, which this component (a fragment)
-// cannot inherit — so it inherits nothing.
+// The `mail-all-inboxes-mail` route carries the open thread's owning accountId and mailbox. The
+// mailbox falls through as a plain attribute — every row carries its own folder ids, which is what
+// the pane and its actions target — and this component (a fragment) cannot inherit attributes, so it
+// inherits nothing. accountId is read: it is half of the open thread's identity here (see openKey).
 defineOptions({ inheritAttrs: false })
 
-const { threadID } = defineProps<{
+const { accountId, threadID } = defineProps<{
+	accountId?: string
 	threadID?: string
 }>()
 
@@ -236,6 +241,16 @@ const store = userStore()
 // account + thread_id since the same thread_id can recur across accounts in this merged view.
 const threadKey = (thread: Thread) => `${thread.account}:${thread.thread_id}`
 
+/**
+ * The open thread's key, from the two route params that name it.
+ *
+ * A thread id is only unique within its account — they are short per-account counters, so two
+ * inboxes of similar size hold the same ones — and this list spans accounts. Everything that
+ * resolves or steps through threads works in key space for that reason: the row the pane is
+ * showing, the cursor, the prev/next step, and the row a verdict moves on from.
+ */
+const openKey = computed(() => (accountId && threadID ? `${accountId}:${threadID}` : undefined))
+
 const {
 	container: mailListRef,
 	hasMore,
@@ -245,6 +260,7 @@ const {
 	threadIDs,
 	threadByOffset,
 	takeResetWindow,
+	resetLimit,
 	beginReset,
 	beginRefresh,
 	onResetSuccess,
@@ -256,10 +272,10 @@ const {
 } = usePaginatedThreads({
 	resource: () => threads,
 	fetchMore: () => loadMoreThreads.reload(),
-	openThreadID: () => threadID,
+	openThreadID: () => openKey.value,
 	// A step off the loaded edge opens the appended thread when the pane is showing, and otherwise
 	// just takes the cursor to it — onto whatever row stands for it (see rowForThread).
-	onEdgeThread: (id, action) => (action === 'open' ? openThread(id) : focusOnThread(id)),
+	onEdgeThread: (key, action) => (action === 'open' ? openThread(key) : focusOnThread(key)),
 	threadKey,
 	// Deferred read — visibleThreadCount is declared below, with the rows it counts.
 	fillProgress: () => visibleThreadCount.value,
@@ -274,12 +290,13 @@ const { filter, FILTER_OPTIONS, filterTitle: title } = useStoredFilter({
 	onChange: () => resetThreads(),
 })
 
-// Reset resource: always the first window, over-fetching one row (PAGE_LENGTH + 1) to detect whether
-// more exist without a total.
+// Reset resource: the window starts at the top and runs as deep as the composable asks (see
+// resetLimit) — one page on a reset, the loaded list on a refresh, so a refresh can tell which loaded
+// rows are gone. Over-fetches one row to detect whether more exist without a total.
 const threads = createResource({
 	url: 'suite.mail.api.mail.get_all_inbox_threads',
 	makeParams: () => ({
-		limit: PAGE_LENGTH + 1,
+		limit: resetLimit(),
 		start: 0,
 		filter_by: filter.value,
 	}),
@@ -378,17 +395,26 @@ const {
 	revealThread,
 } = useListRows({
 	threads: () => threads.data ?? [],
-	// A thread's row key is its id, so the cursor can be pointed straight at a thread.
-	rowKey: (thread: Thread) => thread.thread_id,
-	openThreadID: () => threadID,
+	// Account-qualified, both of them: the cursor can be pointed straight at a thread, and it lands
+	// on the right account's row when two of them share a thread id.
+	rowKey: threadKey,
+	threadKey,
+	openThreadID: () => openKey.value,
 	onOpenThreadHidden: () => closeThread(),
 	container: mailListRef,
 })
 
+// ThreadHeader's prev/next arrows compare their list against the route's plain thread id, so they
+// get plain ids. Key space is for stepping and resolution — where landing on the wrong account's
+// duplicate actually shows the wrong mail; here it would only mis-grey an arrow.
+const headerThreadIDs = computed(() => (threads.data ?? []).map((t: Thread) => t.thread_id))
+
 // The loaded row the open thread belongs to. Every mutation reads its account/archive/trash
 // off the row, so the pane acts on the owning account without consulting the active one.
 const openRow = computed(() =>
-	threadID ? (threads.data ?? []).find((t: Thread) => t.thread_id === threadID) : undefined,
+	openKey.value
+		? (threads.data ?? []).find((t: Thread) => threadKey(t) === openKey.value)
+		: undefined,
 )
 
 // MailThread's slide name while a swipe navigation renders; cleared on its slide-done, and left
@@ -397,7 +423,11 @@ const threadSlide = ref('')
 let pendingThreadSlide = ''
 
 // Swipe on the open thread (mobile): left → next thread, right → previous.
-const { onTouchStart: onThreadTouchStart, onTouchEnd: onThreadTouchEnd } = useSwipeNav(
+const {
+	onTouchStart: onThreadTouchStart,
+	onTouchMove: onThreadTouchMove,
+	onTouchEnd: onThreadTouchEnd,
+} = useSwipeNav(
 	() => isMobile.value && !!threadID,
 	(offset) => {
 		// Arms the paging animation for this navigation only — openThread consumes it.
@@ -423,8 +453,8 @@ const gPrefix = useGPrefix()
 // itself, so a shortcut in the merged list targets the owning account like a click does.
 // Returns true when it consumed the key.
 const actionTarget = computed(() => {
-	const key = threadID ?? focusedRowKey.value
-	return (threads.data ?? []).find((t: Thread) => t.thread_id === key)
+	const key = openKey.value ?? focusedRowKey.value
+	return (threads.data ?? []).find((t: Thread) => threadKey(t) === key)
 })
 
 const handleThreadActions = (e: KeyboardEvent, key: string) => {
@@ -516,7 +546,7 @@ const handleKeyDown = (e: KeyboardEvent) => {
 const activateFocusedRow = () => {
 	const row = focusedRow.value
 	if (!row) return
-	if (row.type === 'thread') return openThread(row.thread.thread_id)
+	if (row.type === 'thread') return openThread(threadKey(row.thread))
 	if (row.type === 'stack') return toggleStack(row)
 	if (!isLastGroup(row.dateKey)) toggleGroupCollapse(row.dateKey)
 }
@@ -524,8 +554,8 @@ const activateFocusedRow = () => {
 // The open thread keeps its row in view, as the mailbox list does: stepping prev/next or deep-linking
 // scrolls the merged list along, and the cursor follows so keyboard navigation resumes from it.
 watch(
-	() => threadID,
-	(val) => val && revealThread(val),
+	openKey,
+	(key) => key && revealThread(key),
 	{ immediate: true },
 )
 
@@ -539,13 +569,15 @@ const goToEdge = (index: number) => {
 	focusRow(navigableRows.value.at(index))
 }
 
-const openThread = (nextThreadID: string) => {
+const openThread = (key: string) => {
 	threadSlide.value = pendingThreadSlide
-	const row = (threads.data ?? []).find((t: Thread) => t.thread_id === nextThreadID)
+	const row = (threads.data ?? []).find((t: Thread) => threadKey(t) === key)
 	if (!row) return
 	router.push({
 		name: 'mail-all-inboxes-mail',
-		params: { accountId: row.account, mailbox: row.inbox, threadID: nextThreadID },
+		// The row's own ids, which is what the key was made of — and what the pane, its actions and
+		// the URL all need in their plain form.
+		params: { accountId: row.account, mailbox: row.inbox, threadID: row.thread_id },
 		query: route.query,
 	})
 }
@@ -556,7 +588,7 @@ const moveOpenThread = (mailboxId: string) => {
 	if (!row) return
 	if (mailboxId === row.archive) return handleArchive(row)
 	if (mailboxId === row.trash) return handleTrash(row)
-	goToNextThreadOrClose(row.thread_id)
+	goToNextThreadOrClose(threadKey(row))
 	const restore = removeFromList(row)
 	const folder = folderName(mailboxId)
 	raiseOptimisticToast(
@@ -618,7 +650,7 @@ const paneCall = (method: string, params: Record<string, unknown>, account?: str
 	return call(`suite.mail.api.mail.${method}`, { account: acting, ...params })
 }
 
-const messageIdsOf = (thread: Thread) => thread.messages?.map((m) => m.id) ?? [thread.id]
+const messageIdsOf = (thread: Thread) => thread.messages?.flatMap(mailCopyIds) ?? [thread.id]
 
 // Marked unread from a message downwards: MailThread reports the ids, we mirror it in the list.
 const handleSyncUnseen = (ids: string[]) => {
@@ -729,7 +761,7 @@ const handleRemoveFromMailbox = (mailboxId: string) => {
 const handleSetSpamStatus = (spam: boolean, target?: Thread) => {
 	const thread = target ?? openRow.value
 	if (!thread) return
-	goToNextThreadOrClose(thread.thread_id)
+	goToNextThreadOrClose(threadKey(thread))
 	const restore = removeFromList(thread)
 	raiseOptimisticToast(
 		paneCall('set_mails_spam_status', { ids: messageIdsOf(thread), spam }, thread.account).catch(
@@ -745,8 +777,9 @@ const handleSetSpamStatus = (spam: boolean, target?: Thread) => {
 }
 
 // Per-message actions from a message's own menu, on the shared orchestration (see useMailRemoval).
-// The merged list is inbox-scoped, so its rows always summarise from the whole conversation — never
-// from a folder, as Sent and Drafts do. No undo yet: the undo requests would have to be scoped to the
+// The merged list is inbox-scoped, so its rows always describe the whole conversation — never a
+// folder's own latest message, as Sent and Drafts do — while taking their date from the account's
+// Inbox, which each row carries. No undo yet: the undo requests would have to be scoped to the
 // row's own account rather than the active one.
 const { setUndoAction } = useUndo()
 
@@ -755,6 +788,7 @@ const { runMailRemoval } = useMailRemoval({
 	mailThreadRef: mailThread,
 	onEmptied: () => closeThread(),
 	removeRow: (_mail, thread) => (thread ? removeFromList(thread) : () => {}),
+	viewMailbox: (thread) => thread.inbox,
 })
 
 // The pane's folder menus are scoped to the thread's own account, so its ids have to be resolved
@@ -775,7 +809,20 @@ const handleMailMove = (mail: Mail, target: string) => {
 	const folder = folderName(target)
 	runMailRemoval(
 		mail,
-		() => paneCall('move_mails', { ids: [mail.id], mailbox: target }, account),
+		() =>
+			paneCall(
+				'move_mails',
+				// A junked copy has to lose the keyword or it lands in the target and is hidden there
+				// — a junked message is only ever shown in Junk (see visible_in_mailbox server-side).
+				// Not when Junk *is* the target, which would file it there and then hide it. The id
+				// is the row's own account's, so the junk mailbox is read off the pane's scope.
+				{
+					ids: [mail.id],
+					mailbox: target,
+					clear_junk: mail.junk === 1 && target !== paneScope.mailboxIds.value.junk,
+				},
+				account,
+			),
 		folder ? __('Mail moved to {0}.', [folder]) : __('Mail moved.'),
 		undoMail(mail, account, __('Mail moved back.')),
 	)
@@ -807,7 +854,7 @@ const handleSetSeen = (thread: Thread, seen: boolean, silent = false) => {
 
 	// Marking the open thread unread means "come back to this later", so leave the pane — staying
 	// in it would just mark it read again. Same exit as useThreadActions does for the mailbox list.
-	if (!seen && threadID === thread.thread_id) closeThread()
+	if (!seen && openKey.value === threadKey(thread)) closeThread()
 	const applySeen = (value: 0 | 1) => {
 		thread.seen = value
 		thread.messages?.forEach((m) => (m.seen = value))
@@ -834,7 +881,7 @@ const handleSetSeen = (thread: Thread, seen: boolean, silent = false) => {
 // message, so BOTH have to be told: the pane's star stayed hollow when starring from the list, and
 // the list's star stayed hollow when starring from the pane. Only the ids actually sent to the
 // server are flipped locally, or a refetch would contradict whatever we lit up.
-const handleSetFlagged = (thread: Thread, flagged: boolean, ids: string[] = [thread.id]) => {
+const handleSetFlagged = (thread: Thread, flagged: boolean, ids: string[] = rowMailIds(thread)) => {
 	// The row stands for its representative mail (see serialize_thread), so it takes the star only
 	// when that mail is one of the ones being starred.
 	const rowChanged = ids.includes(thread.id)
@@ -842,7 +889,7 @@ const handleSetFlagged = (thread: Thread, flagged: boolean, ids: string[] = [thr
 		if (rowChanged) thread.flagged = value
 	}
 	const applyPane = (value: boolean) => {
-		if (threadID === thread.thread_id) mailThread.value?.syncFlagged(ids, value)
+		if (openKey.value === threadKey(thread)) mailThread.value?.syncFlagged(ids, value)
 	}
 
 	applyRow(flagged ? 1 : 0)
@@ -865,10 +912,11 @@ const handleSetFlagged = (thread: Thread, flagged: boolean, ids: string[] = [thr
 // Acting on the open thread from the pane should leave you on the next one, not on a thread that
 // is no longer in the list. Resolved before the row is removed, so the index is still meaningful;
 // falls back to closing the pane at the end of the list. Mirrors MailboxView.
-const goToNextThreadOrClose = (movedThreadID: string) => {
-	if (threadID !== movedThreadID) return
-	const ids = threadIDs.value
-	const next = ids.slice(ids.indexOf(movedThreadID) + 1).find((id) => id !== movedThreadID)
+const goToNextThreadOrClose = (movedKey: string) => {
+	if (openKey.value !== movedKey) return
+	const keys = threadIDs.value
+	// Below first, then above — the same turn-around the mailbox makes at the end of the list.
+	const next = neighbourAfterRemoval(keys, keys.indexOf(movedKey), (key) => key !== movedKey)
 	if (next) openThread(next)
 	else closeThread()
 }
@@ -914,7 +962,7 @@ const moveThreadOut = (thread: Thread, mailbox: string, restore: () => void) => 
 
 const handleArchive = (thread: Thread) => {
 	if (!thread.archive) return raiseToast(__('No Archive folder for this account.'), 'error')
-	goToNextThreadOrClose(thread.thread_id)
+	goToNextThreadOrClose(threadKey(thread))
 	const restore = removeFromList(thread)
 	raiseOptimisticToast(
 		moveThreadOut(thread, thread.archive!, restore),
@@ -925,7 +973,7 @@ const handleArchive = (thread: Thread) => {
 
 const handleTrash = (thread: Thread) => {
 	if (!thread.trash) return raiseToast(__('No Trash folder for this account.'), 'error')
-	goToNextThreadOrClose(thread.thread_id)
+	goToNextThreadOrClose(threadKey(thread))
 	const restore = removeFromList(thread)
 	raiseOptimisticToast(
 		moveThreadOut(thread, thread.trash!, restore),
@@ -989,22 +1037,25 @@ const unreadPrefix = computed(() =>
 	store.allInboxesUnread.data ? `(${store.allInboxesUnread.data})` : '',
 )
 
-usePageMeta(() => ({ title: `${unreadPrefix.value} ${__('All Inboxes')}` }))
+usePageMeta(() => appPageMeta(`${unreadPrefix.value} ${__('All Inboxes')}`, 'Mail'))
 
-// Keep the merged list fresh: poll periodically and react to new-mail push events (which can arrive
-// for any account). Both merge the newest window at the top, preserving scroll.
+// Keep the merged list fresh: poll periodically and react to push events — new mail, or mail changed
+// on another device — which can arrive for any account. Either way the newest window is merged into
+// the list, preserving scroll.
 const reloadInterval = ref<ReturnType<typeof setInterval>>()
 const onNewMail = () => refreshThreads()
 
 onMounted(() => {
 	reloadInterval.value = setInterval(onNewMail, 30000)
 	socket.on('new_mail_created', onNewMail)
+	socket.on('mail_changed', onNewMail)
 	window.addEventListener('keydown', handleKeyDown)
 })
 
 onUnmounted(() => {
 	if (reloadInterval.value) clearInterval(reloadInterval.value)
 	socket.off('new_mail_created', onNewMail)
+	socket.off('mail_changed', onNewMail)
 	window.removeEventListener('keydown', handleKeyDown)
 })
 </script>

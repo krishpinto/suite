@@ -3,23 +3,14 @@ import frappe
 CONFIG_KEY_FIELD_MAP = {
     # JMAP
     "server_url": None,
-    "username": None,
-    "password": None,
     # SpamAssassin
     "spamd_host": None,
     "spamd_port": None,
     "spamd_scanning_mode": None,
     "spamd_hybrid_scanning_threshold": None,
     # Defaults
-    "default_dns_ttl": None,
     "default_mail_quota": "default_disk_quota_gb",
     "gravatar_default_avatar": "default_gravatar",
-    "stalwart_version": None,
-    "stalwart_cli_version": None,
-    # Logs
-    "push_log_file_count": None,
-    "push_log_level": None,
-    "push_log_max_size": "push_log_max_file_size",
     # Limits
     "exchange_max_export": None,
     "exchange_max_import": None,
@@ -30,12 +21,8 @@ CONFIG_KEY_FIELD_MAP = {
     "process_pending_emails_batch_size": None,
     "process_pending_emails_max_batch_size": None,
     # Timeouts
-    "ansible_play_timeout": None,
-    "server_job_timeout": None,
-    "server_deployment_timeout": None,
     "scan_message_timeout": None,
     "process_pending_emails_timeout": None,
-    "stalwart_cli_command_timeout": None,
     "exchange_export_timeout": None,
     "exchange_import_timeout": None,
 }

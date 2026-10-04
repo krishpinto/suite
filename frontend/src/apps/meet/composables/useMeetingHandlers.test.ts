@@ -3,11 +3,20 @@ import { ref } from "vue";
 import { useMeetingHandlers } from "./useMeetingHandlers";
 
 vi.mock("frappe-ui", () => ({
-	frappeRequest: vi.fn(),
 	toast: { success: vi.fn(), error: vi.fn() },
 }));
 
-import { frappeRequest, toast } from "frappe-ui";
+import { toast } from "frappe-ui";
+
+const createRemovalHarness = (sendHostControl: ReturnType<typeof vi.fn> | null) => {
+	const banGuest = { error: null, submit: vi.fn().mockResolvedValue({ status: "banned" }) };
+	const handlers = useMeetingHandlers({
+		meetingId: "room-1",
+		meetingDoc: { banGuest },
+		sfuConnection: { sfuManager: ref(sendHostControl ? { sendHostControl } : null) },
+	} as never);
+	return { banGuest, handlers };
+};
 
 describe("useMeetingHandlers", () => {
 	beforeEach(() => vi.clearAllMocks());
@@ -17,6 +26,7 @@ describe("useMeetingHandlers", () => {
 		const sfuManager = ref({ cleanup });
 		const connectionState = {
 			connectionError: "Recovery exhausted",
+			guestAuthToken: "stale-token",
 			isInPreview: false,
 		};
 		const handlers = useMeetingHandlers({
@@ -29,6 +39,7 @@ describe("useMeetingHandlers", () => {
 		expect(cleanup).toHaveBeenCalledOnce();
 		expect(sfuManager.value).toBeNull();
 		expect(connectionState.connectionError).toBeNull();
+		expect(connectionState.guestAuthToken).toBeNull();
 		expect(connectionState.isInPreview).toBe(true);
 	});
 
@@ -59,43 +70,29 @@ describe("useMeetingHandlers", () => {
 	});
 
 	it("records a guest ban before sending the distinct SFU ban action", async () => {
-		vi.mocked(frappeRequest).mockResolvedValue({ status: "banned" });
 		const sendHostControl = vi.fn();
-		const handlers = useMeetingHandlers({
-			meetingId: "room-1",
-			sfuConnection: { sfuManager: ref({ sendHostControl }) },
-		} as never);
+		const { banGuest, handlers } = createRemovalHarness(sendHostControl);
 
 		await handlers.handleKickParticipant("guest_1", true);
 
-		expect(frappeRequest).toHaveBeenCalledWith({
-			url: "suite.meet.api.meeting.ban_guest",
-			params: { meeting_id: "room-1", guest_id: "guest_1" },
-		});
+		expect(banGuest.submit).toHaveBeenCalledWith({ guest_id: "guest_1" });
 		expect(sendHostControl).toHaveBeenCalledWith("ban_participant", "guest_1");
 	});
 
 	it("does not record a backend ban without an SFU manager", async () => {
-		const handlers = useMeetingHandlers({
-			meetingId: "room-1",
-			sfuConnection: { sfuManager: ref(null) },
-		} as never);
+		const { banGuest, handlers } = createRemovalHarness(null);
 
 		await handlers.handleKickParticipant("guest_1", true);
 
-		expect(frappeRequest).not.toHaveBeenCalled();
+		expect(banGuest.submit).not.toHaveBeenCalled();
 		expect(toast.error).toHaveBeenCalledWith(
 			expect.stringContaining("Reconnect"),
 		);
 	});
 
 	it("surfaces an acknowledged ban failure after backend revocation", async () => {
-		vi.mocked(frappeRequest).mockResolvedValue({ status: "banned" });
 		const sendHostControl = vi.fn().mockRejectedValue(new Error("SFU rejected"));
-		const handlers = useMeetingHandlers({
-			meetingId: "room-1",
-			sfuConnection: { sfuManager: ref({ sendHostControl }) },
-		} as never);
+		const { handlers } = createRemovalHarness(sendHostControl);
 
 		await handlers.handleKickParticipant("guest_1", true);
 
@@ -106,14 +103,11 @@ describe("useMeetingHandlers", () => {
 
 	it("keeps authenticated participant removal remove-only", async () => {
 		const sendHostControl = vi.fn();
-		const handlers = useMeetingHandlers({
-			meetingId: "room-1",
-			sfuConnection: { sfuManager: ref({ sendHostControl }) },
-		} as never);
+		const { banGuest, handlers } = createRemovalHarness(sendHostControl);
 
 		await handlers.handleKickParticipant("member@example.com", true);
 
-		expect(frappeRequest).not.toHaveBeenCalled();
+		expect(banGuest.submit).not.toHaveBeenCalled();
 		expect(sendHostControl).toHaveBeenCalledWith(
 			"kick_participant",
 			"member@example.com",

@@ -7,6 +7,17 @@
   line-height: var(--editor-line-height, 1.5);
 }
 
+/* frappe-ui's editor stylesheet puts `word-break: break-word` on .ProseMirror.
+   CSS Text 3 keeps that keyword only for legacy content, and engines disagree
+   on it: a word can be cut at the end of a line even though the whole word
+   fits on the next one. A document must move the word down instead. The class
+   is repeated to outrank the frappe-ui rule without !important. overflow-wrap
+   still keeps a long unbreakable string, such as a URL, inside the page. */
+.ProseMirror.ProseMirror {
+  word-break: normal;
+  overflow-wrap: break-word;
+}
+
 .prose-v3 p + p {
   margin-top: var(--paragraph-spacing-before, 0);
 }

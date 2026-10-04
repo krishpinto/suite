@@ -8,7 +8,7 @@ import {
 import { MEDIA_FAULT_SCRIPT, STUB_MEDIA_SCRIPT } from "./media";
 import { loginViaApi } from "../../shared/auth";
 import {
-	clearMeetingCreateRateLimit,
+	clearMeetingRateLimits,
 	createMeetingViaApi,
 	type MeetingType,
 } from "../helpers/meeting";
@@ -39,10 +39,8 @@ async function gotoAppPage(page: Page, pathname: string): Promise<void> {
 interface Participant {
 	context: BrowserContext;
 	page: Page;
-	joinMeeting(meetingId: string): Promise<void>;
 	joinAsGuest(meetingId: string, guestName: string): Promise<void>;
 	joinAsHost(meetingId: string): Promise<void>;
-	endCall(): Promise<void>;
 }
 
 interface TestFixtures {
@@ -53,6 +51,44 @@ interface TestFixtures {
 }
 
 async function prepareContext(context: BrowserContext): Promise<void> {
+	if (process.env.MEET_TEST_SFU_URL) {
+		const endpoint = new URL(process.env.MEET_TEST_SFU_URL);
+		if (
+			!["http:", "https:"].includes(endpoint.protocol) ||
+			!["127.0.0.1", "[::1]"].includes(endpoint.hostname) ||
+			endpoint.username ||
+			endpoint.password ||
+			endpoint.pathname !== "/" ||
+			endpoint.search ||
+			endpoint.hash
+		) {
+			throw new Error("MEET_TEST_SFU_URL must be a loopback HTTP(S) origin");
+		}
+		await context.route(
+			(url) =>
+				url.origin === new URL(baseURL).origin &&
+				/^\/api\/v2\/method\/suite\.meet\.api\.meeting\.(join_meeting|join_meeting_as_guest|refresh_sfu_token|refresh_guest_sfu_token|get_sfu_presence_preview_token|get_sfu_connection_details|get_approved_guest_connection_details)$/.test(url.pathname),
+			async (route) => {
+				const response = await route.fetch();
+				if (
+					!response.ok() ||
+					!response.headers()["content-type"]?.includes("application/json")
+				) {
+					await route.fulfill({ response });
+					return;
+				}
+				const body = await response.json();
+				// Preserve Frappe-issued JWTs and claims; redirect only endpoint metadata.
+				if (body.data && "sfu_url" in body.data) {
+					body.data.sfu_url = endpoint.origin;
+					body.data.sfu_port = Number(
+						endpoint.port || (endpoint.protocol === "https:" ? 443 : 80),
+					);
+				}
+				await route.fulfill({ response, json: body });
+			},
+		);
+	}
 	await context.addInitScript({
 		content: `${STUB_MEDIA_SCRIPT}\n${MEDIA_FAULT_SCRIPT}`,
 	});
@@ -151,10 +187,6 @@ async function buildParticipant(browser: Browser): Promise<Participant> {
 	return {
 		context,
 		page,
-		async joinMeeting(meetingId: string) {
-			await gotoAppPage(page, `/meet/${meetingId}`);
-			await joinFromPreview(page);
-		},
 		async joinAsGuest(meetingId: string, guestName: string) {
 			await gotoAppPage(page, `/meet/${meetingId}`);
 			await expect(page.getByRole("heading", { name: "Ready to join?" })).toBeVisible({
@@ -174,10 +206,6 @@ async function buildParticipant(browser: Browser): Promise<Participant> {
 			await gotoAppPage(page, `/meet/${meetingId}`);
 			await joinFromPreview(page);
 		},
-		async endCall() {
-			await page.getByRole("button", { name: "End Call" }).click();
-			await page.waitForURL(/\/meet\/?$/);
-		},
 	};
 }
 
@@ -189,6 +217,7 @@ export const test = base.extend<TestFixtures>({
 		const page = await context.newPage();
 		await gotoAppPage(page, "/meet/");
 		await use(page);
+		await context.unrouteAll({ behavior: "ignoreErrors" });
 		await context.close();
 	},
 
@@ -198,7 +227,7 @@ export const test = base.extend<TestFixtures>({
 		await loginViaApi(api, meetHost);
 
 		await use(async (meetingType = "open") => {
-			await clearMeetingCreateRateLimit(api);
+			await clearMeetingRateLimits(api);
 			return createMeetingViaApi(api, meetingType);
 		});
 
@@ -207,7 +236,7 @@ export const test = base.extend<TestFixtures>({
 
 	createMeetingViaUi: async ({ hostPage }, use) => {
 		await use(async (meetingType = "open") => {
-			await clearMeetingCreateRateLimit(hostPage.request);
+			await clearMeetingRateLimits(hostPage.request);
 			return createMeetingViaUi(hostPage, meetingType);
 		});
 	},
@@ -222,7 +251,10 @@ export const test = base.extend<TestFixtures>({
 		});
 
 		await Promise.all(
-			participants.map((participant) => participant.context.close()),
+			participants.map(async ({ context }) => {
+				await context.unrouteAll({ behavior: "ignoreErrors" });
+				await context.close();
+			}),
 		);
 	},
 });

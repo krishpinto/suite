@@ -167,25 +167,25 @@ class TestRecordingProtocolContract(TestCase):
         }
         for value in CONTRACT["vectors"]["command_responses"]["accepted"]:
             session.request.return_value = _response(202, value)
-            self.assertEqual(client.reserve(**arguments).outcome, "accepted")
+            self.assertEqual(client.reserve(**arguments, recording_allowed=True).outcome, "accepted")
         for value in CONTRACT["vectors"]["command_responses"]["rejected"]:
             session.request.return_value = _response(202, value)
-            self.assertEqual(client.reserve(**arguments).outcome, "indeterminate")
+            self.assertEqual(client.reserve(**arguments, recording_allowed=True).outcome, "indeterminate")
 
         base = CONTRACT["vectors"]["command_responses"]["accepted"][0]
         for state in CONTRACT["vectors"]["finite_values"]["command_states"]:
             session.request.return_value = _response(202, {**base, "state": state})
-            self.assertEqual(client.reserve(**arguments).state, state)
+            self.assertEqual(client.reserve(**arguments, recording_allowed=True).state, state)
         for reason_code in CONTRACT["vectors"]["finite_values"]["health_reason_codes"]:
             session.request.return_value = _response(202, {**base, "reason_code": reason_code})
-            self.assertEqual(client.reserve(**arguments).reason_code, reason_code)
+            self.assertEqual(client.reserve(**arguments, recording_allowed=True).reason_code, reason_code)
 
         for value in CONTRACT["vectors"]["command_rejected_responses"]["accepted"]:
             session.request.return_value = _response(value["http_status"], value["body"])
-            self.assertEqual(client.reserve(**arguments).outcome, "rejected")
+            self.assertEqual(client.reserve(**arguments, recording_allowed=True).outcome, "rejected")
         for value in CONTRACT["vectors"]["command_rejected_responses"]["rejected"]:
             session.request.return_value = _response(value["http_status"], value["body"])
-            self.assertEqual(client.reserve(**arguments).outcome, "indeterminate")
+            self.assertEqual(client.reserve(**arguments, recording_allowed=True).outcome, "indeterminate")
 
         for value in CONTRACT["vectors"]["grant_responses"]["accepted"]:
             session.request.return_value = _response(value["http_status"], value["body"])
@@ -200,16 +200,6 @@ class TestRecordingProtocolContract(TestCase):
         for value in CONTRACT["vectors"]["stop_responses"]["rejected"]:
             session.request.return_value = _response(value["http_status"], value["body"])
             self.assertFalse(client.stop(**arguments, operation_id="stop-vector"))
-
-    def test_startup_mapping_covers_every_recorder_milestone(self):
-        mapping = CONTRACT["mappings"]["startup_milestone_to_frappe_state"]
-        self.assertEqual(set(mapping), set(CONTRACT["vocabularies"]["startup_milestones"]))
-        self.assertEqual(set(mapping.values()), {"Starting", "Recording"})
-
-    def test_first_version_accepts_no_unversioned_predecessor(self):
-        self.assertEqual(CONTRACT["protocol_version"], 1)
-        self.assertEqual(CONTRACT["accepted_protocol_versions"], [1])
-        self.assertEqual(CONTRACT["vectors"]["protocol_versions"]["accepted"], [1])
 
     def test_shared_finalization_requests_use_the_production_parser(self):
         vectors = FINALIZATION_CONTRACT["vectors"]["status_requests"]

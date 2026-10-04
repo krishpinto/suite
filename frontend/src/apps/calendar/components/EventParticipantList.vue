@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { Check, Minus, X } from 'lucide-vue-next'
 import { Avatar, Button } from 'frappe-ui'
 
+import { participationStatusDisplay } from '@/apps/calendar/utils'
 import { extractNameFromEmail } from '@/apps/calendar/utils/format'
 import { userStore } from '@/apps/calendar/stores/user'
 
@@ -24,11 +24,6 @@ const isUserOrganizer = computed(
 const showRemoveParticipant = (participant: any) =>
 	!participant.isOrganizer && (isUserOrganizer.value || participant.isNew) && !dontShowRemove
 
-const getParticipantStatusValues = (status: string) => {
-	if (status === 'ACCEPTED') return { icon: Check, class: 'bg-surface-green-1 text-ink-green-6' }
-	if (status === 'TENTATIVE') return { icon: Minus, class: 'bg-surface-gray-1 text-ink-gray-6' }
-	return { icon: X, class: 'bg-surface-red-1 text-ink-red-6' }
-}
 </script>
 <template>
 	<div v-for="p in participants" :key="p.email">
@@ -51,15 +46,18 @@ const getParticipantStatusValues = (status: string) => {
 								p.participation_status && p.participation_status !== 'NEEDS-ACTION'
 							"
 							class="rounded-full p-px"
-							:class="getParticipantStatusValues(p.participation_status).class"
+							:class="participationStatusDisplay(p.participation_status).class"
 						>
 							<component
-								:is="getParticipantStatusValues(p.participation_status).icon"
+								:is="participationStatusDisplay(p.participation_status).icon"
 								class="h-3 w-3"
 							/>
 						</div>
 					</div>
-					<span class="text-ink-gray-5 text-sm">{{ p.email }}</span>
+					<!-- The paragraph variant, not `text-sm`: at 13px its 1.15 leading gives a
+					     line box shorter than the glyphs themselves, so the descender of a g or a
+					     y hung below it and the participants list clipped it at its scroll edge. -->
+					<span class="text-ink-gray-5 text-p-sm">{{ p.email }}</span>
 				</div>
 			</div>
 

@@ -92,7 +92,6 @@ function parseLogLevel(level: SFULogLevel): LogLevel {
 export const loggers = {
 	workerManager: new Logger('WorkerManager'),
 	roomManager: new Logger('RoomManager'),
-	peerManager: new Logger('PeerManager'),
 	transportManager: new Logger('TransportManager'),
 	producerManager: new Logger('ProducerManager'),
 	consumerManager: new Logger('ConsumerManager'),
@@ -100,6 +99,7 @@ export const loggers = {
 	socketHandler: new Logger('SocketHandler'),
 	authManager: new Logger('AuthManager'),
 	server: new Logger('Server'),
+	stt: new Logger('STT'),
 	telemetry: new Logger('Telemetry'),
 } as const;
 

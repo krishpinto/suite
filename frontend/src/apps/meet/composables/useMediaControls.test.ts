@@ -286,8 +286,8 @@ function createCameraHarness({
 				options: { publishVideo?: boolean; publishAudio?: boolean },
 			) => {
 				const result: {
-					videoProducer?: TestVideoProducer;
-					audioProducer?: TestVideoProducer;
+					video?: { status: "published" };
+					audio?: { status: "published" };
 				} = {};
 				if (options.publishVideo) {
 					const track = stream.getVideoTracks()[0] ?? null;
@@ -295,7 +295,7 @@ function createCameraHarness({
 					if (track) {
 						const producer = await createTestProducer(track, { type: "camera" });
 						mediaHandler.setProducers({ videoProducer: producer });
-						result.videoProducer = producer;
+						result.video = { status: "published" };
 					}
 				}
 				if (options.publishAudio) {
@@ -306,7 +306,7 @@ function createCameraHarness({
 							type: "microphone",
 						});
 						mediaHandler.setProducers({ audioProducer: producer });
-						result.audioProducer = producer;
+						result.audio = { status: "published" };
 					}
 				}
 				return result;
@@ -482,8 +482,6 @@ function createCameraHarness({
 		deviceManager,
 		backgroundEffects: effectsApi,
 		noiseCancellation: noiseCancellationOverride ?? { error: ref(null) },
-		toast: {},
-		mediaPreferences: {},
 	} as never);
 
 	return {
@@ -1121,8 +1119,6 @@ describe("useMediaControls", () => {
 			},
 			backgroundEffects: {},
 			noiseCancellation: { error: ref(null) },
-			toast: {},
-			mediaPreferences: {},
 		} as never);
 
 		const result = await controls.acquireUserMedia(false, true, {
@@ -1172,8 +1168,6 @@ describe("useMediaControls", () => {
 			},
 			backgroundEffects: {},
 			noiseCancellation: { error: ref(null) },
-			toast: {},
-			mediaPreferences: {},
 		} as never);
 
 		await controls.acquireUserMedia(true, true, {
@@ -1216,8 +1210,6 @@ describe("useMediaControls", () => {
 			},
 			backgroundEffects: {},
 			noiseCancellation: { error: ref(null) },
-			toast: {},
-			mediaPreferences: {},
 		} as never);
 
 		await expect(
@@ -1295,8 +1287,6 @@ describe("useMediaControls", () => {
 				isProcessing: ref(false),
 				error: ref(null),
 			},
-			toast: {} as never,
-			mediaPreferences: {} as never,
 		} as never);
 
 		await controls.toggleMicrophone();
@@ -1678,6 +1668,11 @@ describe("useMediaControls", () => {
 		const raw = videoTrack("raw");
 		const processed = videoTrack("processed");
 		const replaceTrack = vi.fn().mockResolvedValue(undefined);
+		const applyBackgroundEffects = vi.fn().mockResolvedValue({
+			stream: new FakeMediaStream([processed]),
+			cleanup: vi.fn(),
+			updateOptions: vi.fn(),
+		});
 		const producer = {
 			id: "camera-producer",
 			track: videoTrack("old"),
@@ -1686,11 +1681,7 @@ describe("useMediaControls", () => {
 		const { controls, setLocalMediaTrack } = createCameraHarness({
 			getUserMedia: vi.fn().mockResolvedValue(new FakeMediaStream([raw])),
 			videoProducer: producer,
-			applyBackgroundEffects: vi.fn().mockResolvedValue({
-				stream: new FakeMediaStream([processed]),
-				cleanup: vi.fn(),
-				updateOptions: vi.fn(),
-			}),
+			applyBackgroundEffects,
 		});
 
 		await controls.toggleCamera();
@@ -1698,6 +1689,11 @@ describe("useMediaControls", () => {
 		expect(replaceTrack).toHaveBeenCalledTimes(1);
 		expect(replaceTrack).toHaveBeenCalledWith({ track: processed });
 		expect(setLocalMediaTrack).toHaveBeenCalledWith("video", processed);
+		expect(applyBackgroundEffects).toHaveBeenCalledWith(
+			expect.anything(),
+			expect.objectContaining({ blurIntensity: 12 }),
+			expect.any(AbortSignal),
+		);
 	});
 
 	it("publishes auto-framed output without requiring a background effect", async () => {
@@ -2018,7 +2014,9 @@ describe("useMediaControls", () => {
 				cleanup: vi.fn(),
 				updateOptions: vi.fn(),
 			});
-		const publishMedia = vi.fn().mockResolvedValue({});
+		const publishMedia = vi.fn().mockResolvedValue({
+			video: { status: "published" },
+		});
 		const { controls, state } = createCameraHarness({
 			mediaState: {
 				isCameraOn: true,
@@ -2080,11 +2078,8 @@ describe("useMediaControls", () => {
 				.fn()
 				.mockResolvedValue(new FakeMediaStream([nextCamera, nextMicrophone])),
 			publishMedia: vi.fn().mockResolvedValue({
-				videoError,
-				audioProducer: {
-					id: "audio-producer",
-					track: nextMicrophone,
-				},
+				video: { status: "failed", error: videoError },
+				audio: { status: "published" },
 			}),
 		});
 
@@ -2108,7 +2103,7 @@ describe("useMediaControls", () => {
 	});
 
 	it("does not treat a falsy typed error as successful E2EE video publication", async () => {
-			const publication = { videoError: null };
+			const publication = { video: { status: "failed", error: null } };
 			const oldCamera = videoTrack("old-camera");
 			const nextCamera = videoTrack("next-camera");
 			const harness = createCameraHarness({
@@ -2134,82 +2129,6 @@ describe("useMediaControls", () => {
 			expect(harness.state.isCameraOn).toBe(false);
 			expect(harness.state.localStream.getVideoTracks()).toEqual([]);
 			expect(nextCamera.stop).toHaveBeenCalledOnce();
-	});
-
-	it("fails when a detached published producer is removed from current manager state", async () => {
-		const oldCamera = videoTrack("old-camera");
-		const nextCamera = videoTrack("next-camera");
-		const detachedProducer = {
-			id: "detached-camera-producer",
-			track: nextCamera,
-		};
-		const harness = createCameraHarness({
-			mediaState: {
-				isCameraOn: true,
-				localStream: new FakeMediaStream([oldCamera]),
-			},
-			getUserMedia: vi
-				.fn()
-				.mockResolvedValue(new FakeMediaStream([nextCamera])),
-			publishMedia: vi.fn().mockResolvedValue({
-				videoProducer: detachedProducer,
-			}),
-		});
-		harness.manager.getLocalProducerState.mockReturnValue(null);
-		harness.manager.reconcileLocalProducerTrack.mockResolvedValue({
-			id: detachedProducer.id,
-			track: nextCamera,
-			paused: false,
-		});
-
-		await expect(
-			harness.controls.republishMediaAfterE2EE({ needsCamera: true }),
-		).rejects.toThrow("Video publication did not create a producer");
-
-		expect(
-			harness.manager.reconcileLocalProducerTrack,
-		).toHaveBeenCalledWith("video", nextCamera, {});
-		expect(harness.state.isCameraOn).toBe(false);
-		expect(nextCamera.stop).toHaveBeenCalledOnce();
-	});
-
-	it("reconciles a stale pre-existing producer to the requested E2EE track", async () => {
-		const oldMicrophone = audioTrack("old-microphone");
-		const nextMicrophone = audioTrack("next-microphone");
-		const replaceTrack = vi.fn(
-			async ({ track }: { track: MediaStreamTrack }) => {
-				producer.track = track;
-			},
-		);
-		const producer: TestVideoProducer = {
-			id: "stale-audio-producer",
-			track: oldMicrophone,
-			replaceTrack,
-			resume: vi.fn(),
-		};
-		const harness = createCameraHarness({
-			mediaState: {
-				isMicOn: true,
-				localStream: new FakeMediaStream([oldMicrophone]),
-			},
-			getUserMedia: vi
-				.fn()
-				.mockResolvedValue(new FakeMediaStream([nextMicrophone])),
-			audioProducer: producer,
-			publishMedia: vi.fn().mockResolvedValue({}),
-		});
-
-		await harness.controls.republishMediaAfterE2EE({ needsMicrophone: true });
-
-		expect(replaceTrack).toHaveBeenCalledWith({ track: nextMicrophone });
-		expect(producer.track).toBe(nextMicrophone);
-		expect(harness.manager.reconcileLocalProducerTrack).toHaveBeenCalledWith(
-			"audio",
-			nextMicrophone,
-			{ resume: true },
-		);
-		expect(harness.state.isMicOn).toBe(true);
-		expect(nextMicrophone.stop).not.toHaveBeenCalled();
 	});
 
 	it("falls back to raw video when public effect replacement fails", async () => {

@@ -1,6 +1,6 @@
-export const THEME_CYCLE = ['automatic', 'light', 'dark'] as const
+const THEME_CYCLE = ['automatic', 'light', 'dark'] as const
 
-export type ThemeMode = (typeof THEME_CYCLE)[number]
+type ThemeMode = (typeof THEME_CYCLE)[number]
 
 export function normalizeTheme(theme?: string | null): ThemeMode {
 	const mode = theme?.toLowerCase()
@@ -10,4 +10,8 @@ export function normalizeTheme(theme?: string | null): ThemeMode {
 export function nextTheme(theme: string): ThemeMode {
 	const current = normalizeTheme(theme)
 	return THEME_CYCLE[(THEME_CYCLE.indexOf(current) + 1) % THEME_CYCLE.length]!
+}
+
+export function themeActionLabel(theme: ThemeMode): string {
+	return theme === 'automatic' ? 'Use system theme' : `Switch to ${theme} theme`
 }

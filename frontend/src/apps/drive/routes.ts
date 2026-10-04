@@ -2,8 +2,7 @@ import type { RouteRecordRaw } from 'vue-router'
 import { createResource } from 'frappe-ui'
 
 import { useSessionStore } from '@/boot/session'
-import { translate } from '@/apps/drive/resources/files'
-import { setupTheme } from '@/utils/setupTheme'
+import { appDocumentTitle } from '@/utils/documentTitle'
 
 /**
  * Drive route module — mounted by the suite router under the '/drive' prefix.
@@ -24,7 +23,16 @@ import { setupTheme } from '@/utils/setupTheme'
 
 const setPageTitle = (to: any) => {
   if (useSessionStore().isLoggedIn) {
-    document.title = __(String(to.name).replace(/^drive-/, ''))
+    document.title = appDocumentTitle(__(String(to.name).replace(/^drive-/, '')), 'Drive')
+  }
+}
+
+const redirectLegacyEntity = async (to: any, name: string) => {
+  const { translate } = await import('@/apps/drive/resources/files')
+  await translate.fetch({ old_name: to.params.entityName })
+  return {
+    name,
+    params: { entityName: translate.data || to.params.entityName },
   }
 }
 
@@ -99,7 +107,6 @@ export const routes: RouteRecordRaw[] = [
       },
       {
         path: 'g/:entityName/',
-        component: () => import('@/apps/drive/pages/Dummy.vue'),
         meta: { allowGuest: true },
         beforeEnter: async (to) => {
           const entity = createResource({
@@ -139,58 +146,29 @@ export const routes: RouteRecordRaw[] = [
         path: 'w/:entityName/:slug?',
         name: 'drive-Document',
         meta: { allowGuest: true },
-        component: () => import('@/apps/drive/pages/Dummy.vue'),
-        beforeEnter: (props) => {
-          window.location.href = '/writer/w/' + props.params.entityName
-        },
+        redirect: (to) => ({
+          name: 'writer-document',
+          params: { id: to.params.entityName, slug: to.params.slug },
+        }),
       },
       // old redirects
       {
         path: 'folder/:entityName',
         meta: { allowGuest: true },
-        component: () => import('@/apps/drive/pages/Dummy.vue'),
-        beforeEnter: async (to) => {
-          await translate.fetch({ old_name: to.params.entityName })
-          return {
-            name: 'drive-Folder',
-            params: {
-              // Untranslatable ids fall through so the page shows its error state
-              entityName: translate.data || to.params.entityName,
-            },
-          }
-        },
+        beforeEnter: (to) => redirectLegacyEntity(to, 'drive-Folder'),
       },
       {
         path: 'document/:entityName',
-        component: () => import('@/apps/drive/pages/Dummy.vue'),
         meta: { allowGuest: true },
-        beforeEnter: async (to) => {
-          await translate.fetch({ old_name: to.params.entityName })
-          return {
-            name: 'drive-Document',
-            params: {
-              entityName: translate.data || to.params.entityName,
-            },
-          }
-        },
+        beforeEnter: (to) => redirectLegacyEntity(to, 'drive-Document'),
       },
       {
         path: 'file/:entityName',
-        component: () => import('@/apps/drive/pages/Dummy.vue'),
         meta: { allowGuest: true },
-        beforeEnter: async (to) => {
-          await translate.fetch({ old_name: to.params.entityName })
-          return {
-            name: 'drive-File',
-            params: {
-              entityName: translate.data || to.params.entityName,
-            },
-          }
-        },
+        beforeEnter: (to) => redirectLegacyEntity(to, 'drive-File'),
       },
       {
         path: 't/:team/:letter/:entityName/:slug?',
-        component: () => import('@/apps/drive/pages/Dummy.vue'),
         meta: { allowGuest: true },
         beforeEnter: async (to) => {
           return {
@@ -204,7 +182,6 @@ export const routes: RouteRecordRaw[] = [
         // recorded — falling back to Home when there is nothing to point at, or
         // when the team was never theirs.
         path: 't/:team/',
-        component: () => import('@/apps/drive/pages/Dummy.vue'),
         meta: { allowGuest: true },
         beforeEnter: async (to) => {
           const legacy = createResource({
@@ -221,22 +198,3 @@ export const routes: RouteRecordRaw[] = [
     ],
   },
 ]
-
-export default routes
-
-/* -------------------------------------------------------------------------- */
-/* Boot side-effects the suite main.ts does not run, so trigger them on drive  */
-/* module load.                                                                */
-/* -------------------------------------------------------------------------- */
-
-// Apply the persisted theme (can't gate the shared mount, so fire-and-forget).
-setupTheme()
-
-// The suite installs ONE global translation plugin so bare `__()` works. We
-// only need to populate `window.translatedMessages`. Backend path preserved.
-const translations = createResource({
-  url: 'suite.drive.api.product.get_translations',
-  cache: 'translations',
-  transform: (data: unknown) => ((window as any).translatedMessages = data),
-})
-if (!(window as any).translatedMessages) translations.fetch()

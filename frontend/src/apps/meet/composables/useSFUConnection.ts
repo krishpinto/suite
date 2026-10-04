@@ -1,4 +1,4 @@
-import { createResource, dialog, frappeRequest, toast } from "frappe-ui";
+import { dialog, toast, useCall } from "frappe-ui";
 import {
 	defineAsyncComponent,
 	computed,
@@ -25,6 +25,7 @@ import {
 } from "../utils/SFUClient";
 import { SFUMeetingManager } from "../utils/SFUMeetingManager";
 import { getClientTelemetry } from "../utils/telemetry/ClientTelemetry";
+import MeetAvatar from "../components/MeetAvatar.vue";
 import { useChatStore } from "./useChatStore";
 import {
 	clearGuestSession,
@@ -66,6 +67,7 @@ import type {
 	ParticipantConnectionState,
 	SFUEventHandlers,
 } from "../utils/sfu/ParticipantConnection";
+import { submit, type Call } from "../utils/request";
 
 const LARGE_MEETING_PARTICIPANT_THRESHOLD = 5;
 
@@ -76,6 +78,10 @@ interface WaitingRoomResponse {
 		user_image?: string;
 		is_guest?: boolean;
 	}>;
+}
+
+interface WaitingRoomDocument {
+	getWaitingRoomDetails: Call<unknown>;
 }
 
 interface MeetingRealtimeEvent {
@@ -195,9 +201,12 @@ export function useSFUConnection(deps: {
 	onScreenShareStarted: (data: SFUScreenShareData) => void;
 	onScreenShareStopped: (data: SFUScreenShareData) => void;
 	onActiveSpeakerChanged: (participantIds: string[]) => void;
+	onRoomRejoined?: (sfuClient: SFUClient) => void;
+	onE2EERequired?: () => void;
 	onRecordingState?: (recording: RecordingState | null) => void;
 	onRecordingEnabled?: (enabled: boolean) => void;
 	onCohostPromoted?: () => Promise<void>;
+	meetingDoc: WaitingRoomDocument;
 }): SFUConnectionAPI {
 	const {
 		connectionState,
@@ -213,9 +222,12 @@ export function useSFUConnection(deps: {
 		onScreenShareStarted,
 		onScreenShareStopped,
 		onActiveSpeakerChanged,
+		onRoomRejoined,
+		onE2EERequired,
 		onRecordingState,
 		onRecordingEnabled,
 		onCohostPromoted,
+		meetingDoc,
 	} = deps;
 
 	const router = useRouter();
@@ -256,11 +268,20 @@ export function useSFUConnection(deps: {
 		mediaState,
 		isCurrentTabHost,
 	});
+	const handleMeetingE2EEEnabled = (data: { meeting_id?: string }) => {
+		if (data.meeting_id === meetingId) onE2EERequired?.();
+		return e2eeHandshake.handleMeetingE2EEEnabled(data);
+	};
 
-	const joinMeetingAPI = createResource({
-		url: "suite.meet.api.meeting.join_meeting",
+	const joinMeetingAPI = useCall<JoinPayload, { meeting_id: string }>({
+		url: "/api/v2/method/suite.meet.api.meeting.join_meeting",
 		method: "POST",
-		makeParams: () => ({ meeting_id: meetingId }),
+		immediate: false,
+	});
+	const getSFUConnectionDetails = useCall<JoinPayload, { meeting_id: string }>({
+		url: "/api/v2/method/suite.meet.api.meeting.get_sfu_connection_details",
+		method: "POST",
+		immediate: false,
 	});
 
 	const activeSpeakerTimeout = shallowRef<ReturnType<typeof setTimeout> | null>(
@@ -311,17 +332,12 @@ export function useSFUConnection(deps: {
 			participant.user_id,
 		);
 
-		const LucideUserIcon = defineAsyncComponent(
-			() => import("~icons/lucide/user"),
-		);
-
 		toast(`${participantName} joined the meeting`, {
-			icon: participant.avatar
-				? h("img", {
-						src: participant.avatar as string,
-						class: "h-5 w-5 rounded-full object-cover",
-					})
-				: h(LucideUserIcon),
+			icon: h(MeetAvatar, {
+				image: participant.avatar,
+				label: participant.user_name || participant.user_id,
+				size: "sm",
+			}),
 			duration: 3000,
 		});
 	};
@@ -340,17 +356,12 @@ export function useSFUConnection(deps: {
 			return;
 		}
 
-		const LucideUserIcon = defineAsyncComponent(
-			() => import("~icons/lucide/user"),
-		);
-
 		toast(`${participantName} left the meeting`, {
-			icon: participant?.avatar
-				? h("img", {
-						src: participant.avatar as string,
-						class: "h-4 w-4 rounded-full object-cover",
-					})
-				: h(LucideUserIcon),
+			icon: h(MeetAvatar, {
+				image: participant?.avatar,
+				label: participantName,
+				size: "xs",
+			}),
 			duration: 3000,
 		});
 	};
@@ -393,6 +404,7 @@ export function useSFUConnection(deps: {
 						"We couldn't restore your meeting connection. Try joining again.";
 				}
 			},
+			onRoomRejoined: () => onRoomRejoined?.(sfuClient),
 			onParticipantJoined: handleParticipantJoined,
 			onParticipantLeft: handleParticipantLeft,
 			onParticipantUpdated: handleParticipantUpdated,
@@ -699,10 +711,9 @@ export function useSFUConnection(deps: {
 
 	const fetchExistingWaitingRoomUsers = async () => {
 		try {
-			const result = normalizeWaitingRoomResponse(await frappeRequest({
-				url: "suite.meet.api.meeting.get_waiting_room",
-				params: { meeting_id: meetingId },
-			}));
+			const result = normalizeWaitingRoomResponse(
+				await submit(meetingDoc.getWaitingRoomDetails),
+			);
 
 			if (result?.waiting_users) {
 				const transformedUsers = result.waiting_users.map((user) => ({
@@ -752,9 +763,6 @@ export function useSFUConnection(deps: {
 				connectionState.guestId = admittedSession.guestId;
 				connectionState.guestSessionToken = admittedSession.guestSessionToken;
 				connectionState.guestAuthToken = response.auth_token;
-				connectionState.guestSfuUrl = response.sfu_url || null;
-				connectionState.guestSfuPort =
-					response.sfu_port == null ? null : String(response.sfu_port);
 				if (response.host_only_chat !== undefined) {
 					chatStore.hostOnlyChat = response.host_only_chat;
 				}
@@ -856,12 +864,9 @@ export function useSFUConnection(deps: {
 			lobbyStore.isWaitingForApproval = false;
 
 			try {
-				const sfuResult = normalizeJoinPayload(await frappeRequest({
-					url: "suite.meet.api.meeting.get_sfu_connection_details",
-					params: {
-						meeting_id: meetingId,
-					},
-				}));
+				const sfuResult = normalizeJoinPayload(
+					await getSFUConnectionDetails.submit({ meeting_id: meetingId }),
+				);
 
 				if (sfuResult) {
 					onRecordingEnabled?.(!!sfuResult.recording_enabled);
@@ -946,7 +951,7 @@ export function useSFUConnection(deps: {
 		socket.on("meeting_user_approved", handleMeetingUserApproved);
 		socket.on("meeting_user_rejected", handleMeetingUserRejected);
 		socket.on("meeting:cohost_promoted", handleCohostPromoted);
-		socket.on("meeting:e2ee_enabled", e2eeHandshake.handleMeetingE2EEEnabled);
+		socket.on("meeting:e2ee_enabled", handleMeetingE2EEEnabled);
 
 		// SFU signal channel handlers and document listeners live in the
 		// E2EE handshake composable; see useE2EEConnectionHandshake.
@@ -964,7 +969,7 @@ export function useSFUConnection(deps: {
 		socket.off("meeting_user_approved", handleMeetingUserApproved);
 		socket.off("meeting_user_rejected", handleMeetingUserRejected);
 		socket.off("meeting:cohost_promoted", handleCohostPromoted);
-		socket.off("meeting:e2ee_enabled", e2eeHandshake.handleMeetingE2EEEnabled);
+		socket.off("meeting:e2ee_enabled", handleMeetingE2EEEnabled);
 
 		e2eeHandshake.teardownRealtimeEventListeners();
 		e2eeHandshake.teardownForDisconnect();
@@ -1017,9 +1022,6 @@ export function useSFUConnection(deps: {
 			connectionState.guestSessionToken = joinResult.guest_session_token;
 			connectionState.guestAuthToken =
 				joinResult.auth_token || null;
-			connectionState.guestSfuUrl = joinResult.sfu_url || null;
-			connectionState.guestSfuPort =
-				joinResult.sfu_port == null ? null : String(joinResult.sfu_port);
 
 			if (joinResult.host_only_chat !== undefined) {
 				chatStore.hostOnlyChat = !!joinResult.host_only_chat;
@@ -1067,10 +1069,10 @@ export function useSFUConnection(deps: {
 			connectionState.isInPreview = false;
 
 			connectionState.guestAuthToken = null;
-			connectionState.guestSfuUrl = null;
-			connectionState.guestSfuPort = null;
 
-			const joinResult = normalizeJoinPayload(await joinMeetingAPI.fetch());
+			const joinResult = normalizeJoinPayload(
+				await joinMeetingAPI.submit({ meeting_id: meetingId }),
+			);
 			if (!joinResult) throw new Error("Invalid meeting join response");
 
 			if (joinResult.status === "waiting_for_approval") {

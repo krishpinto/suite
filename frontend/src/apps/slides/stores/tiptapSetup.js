@@ -13,13 +13,13 @@ import { Table, TableCell, TableHeader, TableRow } from '@tiptap/extension-table
 import { Selection } from '@tiptap/extensions'
 
 import { Fragment, Slice } from 'prosemirror-model'
-import { cellAround, CellSelection } from 'prosemirror-tables'
+import { cellAround, CellSelection } from '@tiptap/pm/tables'
 import { Plugin, PluginKey, TextSelection } from 'prosemirror-state'
 import { Decoration, DecorationSet } from 'prosemirror-view'
-import { joinBackward } from 'prosemirror-commands'
-import { liftListItem } from 'prosemirror-schema-list'
+import { joinBackward } from '@tiptap/pm/commands'
+import { liftListItem } from '@tiptap/pm/schema-list'
 
-import { getDocFromHTML } from '@/apps/slides/utils/helpers'
+import { getDocFromHTML, hasListMarkup } from '@/apps/slides/utils/helpers'
 import { scaleAwareColumnResizing } from '@/apps/slides/utils/columnResizing'
 
 const parseElementStyle = (attribute, value) => {
@@ -106,7 +106,7 @@ const cellsToClear = ({ selection, doc }) => {
 	return cells.length ? CellSelection.create(doc, cells[0].pos, cells[cells.length - 1].pos) : null
 }
 
-export const getFirstMarks = (node) => {
+const getFirstMarks = (node) => {
 	let marks = []
 	node.descendants((child) => {
 		if (!marks.length && child.isText) marks = child.marks
@@ -150,13 +150,42 @@ const PastePlainText = Extension.create({
 
 	addProseMirrorPlugins() {
 		const pasteWithInheritedStyles = (view, event) => {
+			// list markup forced through plain text comes out unbulleted,
+			// so it falls through to the default rich paste instead
+			if (hasListMarkup(event.clipboardData?.getData('text/html'))) return false
+
 			const plainText = event.clipboardData?.getData('text/plain')
 			if (!plainText) return false
 
 			const { state, dispatch } = view
-			const { tr } = state
+			const { selection, schema } = state
+			// select all starts at the doc, not in a line
+			const $line = selection.$from.parent.isTextblock
+				? selection.$from
+				: TextSelection.findFrom(selection.$from, 1, true).$from
+			const marks =
+				state.storedMarks ||
+				(selection.empty ? $line.marks() : $line.marksAcross(selection.$to) || $line.marks())
+			// inside a list a pasted line is a new item, not a second paragraph in this one
+			const inList = isInList($line)
+			const line = $line.parent
+			const item = $line.node(-1)
 
-			dispatch(tr.insertText(plainText, state.selection.from, state.selection.to))
+			const blocks = plainText.split(/\r\n?|\n/).map((text) => {
+				const paragraph = line.type.create(line.attrs, text ? schema.text(text, marks) : null)
+				return inList ? item.type.create(item.attrs, paragraph) : paragraph
+			})
+			const depth = inList ? 2 : 1
+
+			const tr = state.tr.replaceSelection(new Slice(Fragment.from(blocks), depth, depth))
+			const emptyLines = []
+			tr.doc.nodesBetween(tr.mapping.map(selection.from, -1), tr.selection.to, (node, pos) => {
+				if (node.isTextblock && !node.content.size) emptyLines.push(pos)
+			})
+			// same placeholder Enter leaves on a new line
+			emptyLines.reverse().forEach((pos) => tr.insert(pos + 1, schema.text(ZWSP, marks)))
+
+			dispatch(tr)
 			return true
 		}
 
@@ -221,6 +250,21 @@ const getItemAttributes = (node) => {
 	return attrs
 }
 
+const getItemStyle = (node, style = '') => {
+	const { color, fontSize, fontFamily, letterSpacing, opacity } = getItemAttributes(node)
+
+	const styleAttrs = [style]
+
+	if (color != null) styleAttrs.push(`color: ${color};`)
+	if (fontSize != null) styleAttrs.push(`font-size: ${fontSize}px;`)
+	if (fontFamily != null) styleAttrs.push(`font-family: ${fontFamily};`)
+	if (letterSpacing != null) styleAttrs.push(`letter-spacing: ${letterSpacing};`)
+	if (opacity != null) styleAttrs.push(`--marker-opacity: ${opacity / 100};`)
+	styleAttrs.push(`line-height: ${node.attrs.lineHeight || '1.5'};`)
+
+	return styleAttrs.join(' ')
+}
+
 const CustomListItem = ListItem.extend({
 	addAttributes() {
 		return {
@@ -238,20 +282,25 @@ const CustomListItem = ListItem.extend({
 	renderHTML({ node, HTMLAttributes, ...rest }) {
 		const liAttrs = { ...HTMLAttributes }
 
-		const { color, fontSize, fontFamily, letterSpacing, opacity } = getItemAttributes(node)
-
-		const styleAttrs = [liAttrs.style || '']
-
-		if (color != null) styleAttrs.push(`color: ${color};`)
-		if (fontSize != null) styleAttrs.push(`font-size: ${fontSize}px;`)
-		if (fontFamily != null) styleAttrs.push(`font-family: ${fontFamily};`)
-		if (letterSpacing != null) styleAttrs.push(`letter-spacing: ${letterSpacing};`)
-		if (opacity != null) styleAttrs.push(`opacity: ${opacity};`)
-		styleAttrs.push(`line-height: ${node.attrs.lineHeight || '1.5'};`)
-
-		liAttrs.style = styleAttrs.join(' ')
+		liAttrs.style = getItemStyle(node, liAttrs.style)
 
 		return ['li', liAttrs, 0]
+	},
+
+	// ProseMirror keeps an item's <li> while its text changes, so the style is rewritten here
+	addNodeView() {
+		return ({ node }) => {
+			const dom = document.createElement('li')
+			dom.style.cssText = getItemStyle(node)
+
+			const update = (updated) => {
+				if (updated.type != node.type) return false
+				dom.style.cssText = getItemStyle(updated)
+				return true
+			}
+
+			return { dom, contentDOM: dom, update }
+		}
 	},
 })
 
@@ -610,7 +659,8 @@ const handleKeyDown = (view, event) => {
 		return true
 	}
 
-	if (prevNode && prevNode.isTextblock && prevNode.textContent === ZWSP) {
+	const caretAtLineStart = selection.empty && $from.parentOffset === 0
+	if (caretAtLineStart && prevNode && prevNode.isTextblock && prevNode.textContent === ZWSP) {
 		return joinBackwardAfterPlaceholder(view)
 	}
 
@@ -1083,6 +1133,11 @@ export const extensions = [
 		orderedList: false,
 		listItem: false,
 		trailingNode: false,
+		// a text box holds paragraphs and lists only
+		heading: false,
+		blockquote: false,
+		codeBlock: false,
+		horizontalRule: false,
 	}),
 	CustomParagraph,
 	CustomListItem,

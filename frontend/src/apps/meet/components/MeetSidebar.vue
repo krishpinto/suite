@@ -5,16 +5,18 @@ import {
 	SidebarHeader,
 	SidebarItem,
 	SidebarSection,
-	createResource,
+	useCall,
 } from "frappe-ui";
 import { computed, inject, ref } from "vue";
 import { useStorage } from "@vueuse/core";
 import { useRoute } from "vue-router";
 
 import { useAppSwitcher } from "@/composables/useAppSwitcher";
+import { useSettingsMenuOption } from "@/composables/useSettingsMenuOption";
 import { setupTheme, switchTheme, themeMode } from "@/utils/setupTheme";
 import { useSessionStore } from "../../../boot/session";
 import FrappeMeetingLogo from "../icons/FrappeMeetingLogo.vue";
+import CommandPaletteSidebarItem from "@/shell/CommandPaletteSidebarItem.vue";
 
 import LucideHome from "~icons/lucide/home";
 import LucideCalendar from "~icons/lucide/calendar";
@@ -31,10 +33,8 @@ setupTheme();
 
 const isCollapsed = useStorage("isSidebarCollapsed", false);
 
-const userResource = createResource({
-	url: "suite.api.account.get_logged_in_user",
-	cache: "User",
-	auto: true,
+const userResource = useCall<{ name?: string; full_name?: string }>({
+	url: "/api/v2/method/suite.api.account.get_logged_in_user",
 });
 
 function selectTheme(theme: string) {
@@ -42,6 +42,7 @@ function selectTheme(theme: string) {
 }
 
 const appsMenuOption = useAppSwitcher("meet");
+const settingsMenuOption = useSettingsMenuOption();
 
 const userName = computed(
 	() => userResource.data?.full_name || userResource.data?.name || "User",
@@ -53,6 +54,7 @@ const settingsItems = computed(() => [
 		hideLabel: true,
 		options: [
 			appsMenuOption.value,
+			settingsMenuOption,
 			{
 				icon: LucideKeyboard,
 				label: "Shortcuts",
@@ -115,13 +117,14 @@ const showShortcutsDialog = inject(
 		/>
 		<div class="flex-1 px-2">
 			<SidebarSection>
+				<CommandPaletteSidebarItem />
 				<SidebarItem
 					label="Home"
-					to="/meet"
+					route="/meet"
 					:icon="LucideHome"
 					:active="route.name === 'meet-home'"
 				/>
-				<SidebarItem label="Calendar" to="/calendar" :icon="LucideCalendar" />
+				<SidebarItem label="Calendar" route="/calendar" :icon="LucideCalendar" />
 			</SidebarSection>
 		</div>
 		<div class="p-2">

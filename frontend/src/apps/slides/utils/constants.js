@@ -1,7 +1,3 @@
-const sectionClasses = 'flex flex-col p-3 border-b'
-const sectionTitleClasses = 'text-base font-medium text-gray-800'
-const fieldLabelClasses = 'text-sm text-gray-600'
-
 const selectionColor = '#3B82F6'
 const lockColor = `${selectionColor}99`
 const guideColor = '#C026D3'
@@ -15,6 +11,7 @@ const defaultShadowColor = '#7C7C7CFF'
 
 const labelClasses = 'select-none font-text text-base text-ink-gray-5'
 const chevronClasses = 'lucide-chevron-down ml-auto size-4 shrink-0 text-ink-gray-4'
+const selectValueClasses = 'block text-right font-text text-base text-ink-gray-7'
 
 const getHandleBaseStyles = (scale) => ({
 	position: 'absolute',
@@ -71,9 +68,6 @@ const allowedImageFileTypes = [
 ]
 
 export {
-	sectionClasses,
-	sectionTitleClasses,
-	fieldLabelClasses,
 	allowedImageFileTypes,
 	selectionColor,
 	lockColor,
@@ -84,6 +78,7 @@ export {
 	defaultShadowColor,
 	labelClasses,
 	chevronClasses,
+	selectValueClasses,
 	getHandleBaseStyles,
 	getStemHandleStyles,
 }

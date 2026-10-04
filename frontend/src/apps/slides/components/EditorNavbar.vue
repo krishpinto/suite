@@ -1,7 +1,6 @@
 <template>
 	<Navbar
-		:primaryButton="primaryButtonProps"
-		:dropdown="showNavbarDropdown ? 'context' : null"
+		:dropdown="route.name === 'slides-editor-new' ? 'home' : 'context'"
 		@performDropdownAction="(action) => emit('performDropdownAction', action)"
 	>
 		<template #default>
@@ -20,7 +19,7 @@
 			</Badge>
 			<OfflineCopyButton v-if="canPin" />
 			<Button
-				v-if="!inReadonlyMode && presentationDoc"
+				v-if="!viewOnly && presentationDoc"
 				variant="ghost"
 				tooltip="Export"
 				@click="emit('performDropdownAction', 'export')"
@@ -29,14 +28,17 @@
 					<LucideDownload class="size-4 stroke-[1.5]" />
 				</template>
 			</Button>
-			<SharePopover v-if="!inReadonlyMode && presentationDoc" />
+			<SharePopover v-if="!viewOnly && presentationDoc" />
+			<PresentButton
+				v-if="route.name !== 'slides-editor-new'"
+				@start="(options) => emit('startSlideShow', options)"
+			/>
 		</template>
 	</Navbar>
 </template>
 
 <script setup>
 import { ref, computed, inject } from 'vue'
-import { Play } from 'lucide-vue-next'
 
 import { Badge, Button } from 'frappe-ui'
 
@@ -44,8 +46,10 @@ import Navbar from '@/apps/slides/components/Navbar.vue'
 import PresentationHeader from '@/apps/slides/components/PresentationHeader.vue'
 import SharePopover from '@/apps/slides/components/SharePopover.vue'
 import OfflineCopyButton from '@/apps/slides/components/OfflineCopyButton.vue'
+import PresentButton from '@/apps/slides/components/PresentButton.vue'
 
-import { presentationDoc } from '@/apps/slides/stores/presentation'
+// export and share need write access, not the edit lock: a second tab keeps both
+import { presentationDoc, viewOnly } from '@/apps/slides/stores/presentation'
 import { saveFailed } from '@/apps/slides/stores/saving'
 import { isMediaOwner } from '@/apps/slides/utils/mediaUploads'
 import { useSessionStore } from '@/boot/session'
@@ -65,12 +69,4 @@ const canPin = computed(() => {
 	return isMediaOwner(presentationDoc.value?.owner, sessionStore.user)
 })
 
-const primaryButtonProps = computed(() => ({
-	label: 'Present',
-	icon: Play,
-	onClick: () => emit('startSlideShow'),
-	hide: route.name === 'slides-editor-new',
-}))
-
-const showNavbarDropdown = computed(() => route.name !== 'slides-editor-new')
 </script>

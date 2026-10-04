@@ -3,8 +3,7 @@
 	     takes the rest (see constants.ts, shared with the screener); otherwise it
 	     fills the width and the pane overlays it (or, on mobile, slides in over it). -->
 	<!-- border-r only in Split View: full-width mode has nothing of its own to
-	     the right, and anything that does sit there (the event detail sidebar)
-	     brings its own border-l — keeping both would double the hairline. -->
+	     the right to rule off from. -->
 	<div
 		class="sticky top-16 flex flex-col"
 		:class="!isMobile && showReadingPane ? SPLIT_LIST_CLASS : 'w-full'"
@@ -33,6 +32,7 @@
 				hidden: !isMobile && !showReadingPane && !threadOpen,
 			}"
 			@touchstart.passive="emit('touchStart', $event)"
+			@touchmove.passive="emit('touchMove', $event)"
 			@touchend.passive="emit('touchEnd', $event)"
 		>
 			<!-- The swipe slide lives inside MailThread (its toolbar must not move), armed via
@@ -71,6 +71,7 @@ const { threadOpen } = defineProps<{
 // forwards the touches. `.passive` stays on the listener here, where the native event is bound.
 const emit = defineEmits<{
 	touchStart: [TouchEvent]
+	touchMove: [TouchEvent]
 	touchEnd: [TouchEvent]
 }>()
 

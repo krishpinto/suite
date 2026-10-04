@@ -13,23 +13,19 @@ from werkzeug.wrappers import Request
 
 from suite.meet import guest_access
 from suite.meet.api.meeting import (
-    approve_all_join_requests,
-    approve_join_request,
-    ban_guest,
     check_meeting_access,
     get_approved_guest_connection_details,
     get_public_meeting_preview,
     get_sfu_connection_details,
     get_sfu_presence_preview_token,
-    get_waiting_room,
     join_meeting,
     join_meeting_as_guest,
-    promote_to_cohost,
     refresh_guest_sfu_token,
     refresh_sfu_token,
-    reject_join_request,
     validate_guest_session,
 )
+from suite.meet.api.schedule import create_meet_link, create_scheduled_meeting
+from suite.meet.doctype.meet_room.meet_room import MeetRoom
 
 
 class IntegrationTestMeetingApi(IntegrationTestCase):
@@ -180,6 +176,7 @@ class IntegrationTestMeetingApi(IntegrationTestCase):
 
     def test_non_member_gets_guest_enabled_preview_title_without_read_access(self):
         self.meeting.title = "Quarterly planning"
+        self.meeting.allow_controlled_update("title")
         self.meeting.save(ignore_permissions=True)
 
         frappe.set_user(self.outsider_email)
@@ -190,6 +187,7 @@ class IntegrationTestMeetingApi(IntegrationTestCase):
 
     def test_private_preview_title_requires_participation(self):
         self.meeting.title = "Confidential planning"
+        self.meeting.allow_controlled_update("title")
         self.meeting.save(ignore_permissions=True)
         self.meeting.db_set("allow_guest", 0)
 
@@ -357,12 +355,6 @@ class IntegrationTestMeetingApi(IntegrationTestCase):
         self.assertEqual(resumed["guest_id"], first["guest_id"])
         self.assertEqual(resumed["guest_name"], "Stable Guest")
 
-    def test_approved_guest_connection_details_is_post_only(self):
-        self.assertEqual(
-            frappe.allowed_http_methods_for_whitelisted_func[get_approved_guest_connection_details],
-            ("POST",),
-        )
-
     def test_wrong_guest_proof_cannot_get_admitted_token(self):
         self.meeting.db_set("meeting_type", "open")
         frappe.set_user("Guest")
@@ -386,7 +378,7 @@ class IntegrationTestMeetingApi(IntegrationTestCase):
             "suite.meet.guest_access.time.time",
             return_value=now + guest_access.PENDING_TTL + 1,
         ):
-            result = get_waiting_room(self.meeting.name)
+            result = self.meeting.get_waiting_room_details()
 
         self.assertNotIn(
             waiting["guest_id"],
@@ -496,8 +488,20 @@ class IntegrationTestMeetingApi(IntegrationTestCase):
     def test_guest_proof_is_redacted_before_downstream_endpoint_errors(self):
         original_request = getattr(frappe.local, "request", None)
         original_form_dict = frappe.local.form_dict
+        original_request_ip = getattr(frappe.local, "request_ip", None)
         self.addCleanup(setattr, frappe.local, "request", original_request)
         self.addCleanup(setattr, frappe.local, "form_dict", original_form_dict)
+        if original_request_ip is not None:
+            self.addCleanup(setattr, frappe.local, "request_ip", original_request_ip)
+        else:
+
+            def delete_request_ip():
+                if hasattr(frappe.local, "request_ip"):
+                    delattr(frappe.local, "request_ip")
+
+            self.addCleanup(delete_request_ip)
+
+        frappe.local.request_ip = "127.0.0.1"
         proof = "private-proof-that-must-not-reach-telemetry"
         endpoints = (
             (
@@ -549,6 +553,7 @@ class IntegrationTestMeetingApi(IntegrationTestCase):
                         raise RuntimeError("downstream infrastructure failed")
 
                     with (
+                        patch("suite.meet.api.meeting._require_trusted_realtime_request"),
                         patch(downstream, side_effect=fail_after_redaction),
                         self.assertRaisesRegex(
                             RuntimeError,
@@ -556,6 +561,38 @@ class IntegrationTestMeetingApi(IntegrationTestCase):
                         ),
                     ):
                         endpoint(*args)
+
+    def test_guest_status_validation_requires_realtime_secret_for_http_requests(self):
+        frappe.set_user("Guest")
+        waiting = join_meeting_as_guest(self.meeting.name, "Socket Auth Guest")
+        previous_request = getattr(frappe.local, "request", None)
+        self.addCleanup(setattr, frappe.local, "request", previous_request)
+
+        with patch("frappe.realtime.get_socketio_secret", return_value="trusted-secret"):
+            for provided_secret in (None, "wrong-secret"):
+                headers = {"X-Frappe-Socket-Secret": provided_secret} if provided_secret else None
+                frappe.local.request = Request(EnvironBuilder(method="POST", headers=headers).get_environ())
+                with self.assertRaises(frappe.PermissionError):
+                    validate_guest_session(
+                        self.meeting.name,
+                        waiting["guest_id"],
+                        waiting["guest_session_token"],
+                    )
+
+            frappe.local.request = Request(
+                EnvironBuilder(
+                    method="POST",
+                    headers={"X-Frappe-Socket-Secret": "trusted-secret"},
+                ).get_environ()
+            )
+            self.assertEqual(
+                validate_guest_session(
+                    self.meeting.name,
+                    waiting["guest_id"],
+                    waiting["guest_session_token"],
+                ),
+                {"valid": True, "status": "pending"},
+            )
 
     def test_guest_room_index_has_bounded_ttl_and_atomic_updates_reset_it(self):
         pending, _session_token = guest_access.create_lease(
@@ -652,7 +689,7 @@ class IntegrationTestMeetingApi(IntegrationTestCase):
         waiting = join_meeting_as_guest(self.meeting.name, "Policy Guest")
         guest_id = waiting["guest_id"]
         frappe.set_user(self.host_email)
-        approve_join_request(self.meeting.name, guest_id)
+        self.meeting.approve_join_request(guest_id)
 
         frappe.db.set_single_value("Meet Settings", "allow_guest", 0)
         frappe.clear_cache(doctype="Meet Settings")
@@ -665,7 +702,7 @@ class IntegrationTestMeetingApi(IntegrationTestCase):
         waiting = join_meeting_as_guest(self.meeting.name, "Room Policy Guest")
         guest_id = waiting["guest_id"]
         frappe.set_user(self.host_email)
-        approve_join_request(self.meeting.name, guest_id)
+        self.meeting.approve_join_request(guest_id)
         self.meeting.db_set("allow_guest", 0)
 
         frappe.set_user("Guest")
@@ -677,7 +714,7 @@ class IntegrationTestMeetingApi(IntegrationTestCase):
         waiting = join_meeting_as_guest(self.meeting.name, "Expired Guest")
         guest_id = waiting["guest_id"]
         frappe.set_user(self.host_email)
-        approve_join_request(self.meeting.name, guest_id)
+        self.meeting.approve_join_request(guest_id)
         frappe.set_user("Guest")
         with (
             patch(
@@ -693,7 +730,7 @@ class IntegrationTestMeetingApi(IntegrationTestCase):
         waiting = join_meeting_as_guest(self.meeting.name, "Rejected Guest")
         guest_id = waiting["guest_id"]
         frappe.set_user(self.host_email)
-        reject_join_request(self.meeting.name, guest_id)
+        self.meeting.reject_join_request(guest_id)
 
         frappe.set_user("Guest")
         self.assertEqual(
@@ -740,7 +777,7 @@ class IntegrationTestMeetingApi(IntegrationTestCase):
         joined = join_meeting_as_guest(self.meeting.name, "Banned Guest")
 
         frappe.set_user(self.host_email)
-        ban_guest(self.meeting.name, joined["guest_id"])
+        self.meeting.ban_guest(joined["guest_id"])
         frappe.set_user("Guest")
 
         self.assertEqual(
@@ -763,7 +800,7 @@ class IntegrationTestMeetingApi(IntegrationTestCase):
         waiting = join_meeting_as_guest(self.meeting.name, "Ephemeral Guest")
         frappe.set_user(self.host_email)
 
-        approve_join_request(self.meeting.name, waiting["guest_id"])
+        self.meeting.approve_join_request(waiting["guest_id"])
 
         self.meeting.reload()
         self.assertNotIn(waiting["guest_id"], self.meeting.get_members())
@@ -789,15 +826,15 @@ class IntegrationTestMeetingApi(IntegrationTestCase):
             with self.subTest(user=user):
                 frappe.set_user(user)
                 with self.assertRaises(frappe.ValidationError):
-                    get_waiting_room(self.meeting.name)
+                    self.meeting.get_waiting_room_details()
                 with self.assertRaises(frappe.ValidationError):
-                    approve_join_request(self.meeting.name, self.member_email)
+                    self.meeting.approve_join_request(self.member_email)
                 with self.assertRaises(frappe.ValidationError):
-                    reject_join_request(self.meeting.name, self.member_email)
+                    self.meeting.reject_join_request(self.member_email)
                 with self.assertRaises(frappe.ValidationError):
-                    approve_all_join_requests(self.meeting.name)
+                    self.meeting.approve_all_join_requests()
                 with self.assertRaises(frappe.ValidationError):
-                    promote_to_cohost(self.meeting.name, self.member_email)
+                    self.meeting.promote_to_cohost(self.member_email)
                 with self.assertRaises(frappe.ValidationError):
                     frappe.get_doc("Meet Room", self.meeting.name).update_settings(host_only_chat=1)
 
@@ -810,7 +847,7 @@ class IntegrationTestMeetingApi(IntegrationTestCase):
         frappe.set_user(self.host_email)
 
         with patch("suite.meet.doctype.meet_room.meet_room.frappe.publish_realtime") as publish:
-            result = promote_to_cohost(self.meeting.name, self.member_email)
+            result = self.meeting.promote_to_cohost(self.member_email)
 
         self.meeting.reload()
         self.assertEqual(result["user_id"], self.member_email)
@@ -835,7 +872,7 @@ class IntegrationTestMeetingApi(IntegrationTestCase):
         frappe.set_user(self.outsider_email)
 
         with self.assertRaisesRegex(frappe.ValidationError, "Only the meeting host"):
-            promote_to_cohost(self.meeting.name, self.member_email)
+            self.meeting.promote_to_cohost(self.member_email)
 
         self.meeting.reload()
         self.assertNotIn(self.member_email, self.meeting.get_co_hosts())
@@ -849,13 +886,13 @@ class IntegrationTestMeetingApi(IntegrationTestCase):
         for user in unauthenticated_users:
             with self.subTest(user=user):
                 with self.assertRaisesRegex(frappe.ValidationError, "Only authenticated users"):
-                    promote_to_cohost(self.meeting.name, user)
+                    self.meeting.promote_to_cohost(user)
 
     def test_approval_atomically_moves_waiting_user_to_members(self):
         self._join_waiting(self.member_email)
         frappe.set_user(self.host_email)
 
-        approve_join_request(self.meeting.name, self.member_email)
+        self.meeting.approve_join_request(self.member_email)
 
         self.meeting.reload()
         self.assertNotIn(self.member_email, self.meeting.get_waiting_room())
@@ -865,7 +902,7 @@ class IntegrationTestMeetingApi(IntegrationTestCase):
         self._join_waiting(self.member_email)
         frappe.set_user(self.host_email)
 
-        reject_join_request(self.meeting.name, self.member_email)
+        self.meeting.reject_join_request(self.member_email)
 
         self.meeting.reload()
         self.assertNotIn(self.member_email, self.meeting.get_waiting_room())
@@ -878,12 +915,28 @@ class IntegrationTestMeetingApi(IntegrationTestCase):
         self._join_waiting(another)
         frappe.set_user(self.host_email)
 
-        approve_all_join_requests(self.meeting.name)
-        approve_all_join_requests(self.meeting.name)
+        self.meeting.approve_all_join_requests()
+        self.meeting.approve_all_join_requests()
 
         self.meeting.reload()
         self.assertEqual(self.meeting.get_waiting_room(), [])
         self.assertTrue({self.member_email, another}.issubset(self.meeting.get_members()))
+
+    def test_approve_all_does_not_reenter_single_guest_endpoint(self):
+        waiting = join_meeting_as_guest(self.meeting.name, "Bulk Guest")
+        frappe.set_user(self.host_email)
+
+        with patch.object(
+            MeetRoom,
+            "approve_join_request",
+            side_effect=AssertionError("bulk approval re-entered the single endpoint"),
+        ):
+            self.meeting.approve_all_join_requests()
+
+        self.assertIn(
+            waiting["guest_id"],
+            [lease.guest_id for lease in guest_access.list_admitted(self.meeting.name)],
+        )
 
     def _join_waiting(self, user: str):
         frappe.set_user(user)

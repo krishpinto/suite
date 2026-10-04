@@ -11,7 +11,7 @@ interface MailThreadInstance {
 	removeMailFromView: (mailId: string) => { emptied: boolean; rollback: () => void }
 }
 
-export interface MailRemovalOptions {
+interface MailRemovalOptions {
 	/** The loaded row the mail's thread belongs to, if it is in the loaded window. */
 	row: (mail: Mail) => Thread | undefined
 	/** The open reading pane, which drops the mail from its own view. */
@@ -23,8 +23,10 @@ export interface MailRemovalOptions {
 	onEmptied: (mail: Mail) => void
 	/** Drop the thread's row from the list. Returns a closure putting it back where it was. */
 	removeRow: (mail: Mail, thread?: Thread) => () => void
-	/** The current mailbox id, but only in Sent or Drafts — see resummariseRow. */
-	outgoingMailbox?: () => string | undefined
+	/** The mailbox a row belongs to in this view, which dates it — see resummariseRow. */
+	viewMailbox?: (thread: Thread) => string | undefined
+	/** Whether that mailbox is Sent or Drafts, whose rows describe the message you wrote. */
+	outgoing?: () => boolean
 	/** Runs once the forward request lands, after the sidebar counts are reloaded. */
 	afterForward?: () => void
 }
@@ -51,7 +53,8 @@ export const useMailRemoval = ({
 	mailThreadRef,
 	onEmptied,
 	removeRow,
-	outgoingMailbox,
+	viewMailbox,
+	outgoing,
 	afterForward,
 }: MailRemovalOptions) => {
 	const { mailboxes } = userStore()
@@ -81,7 +84,10 @@ export const useMailRemoval = ({
 			const index = thread.messages.findIndex((m: Mail) => m.id === mail.id)
 			if (index === -1) return () => {}
 			thread.messages.splice(index, 1)
-			const restoreSummary = resummariseRow(thread, outgoingMailbox?.())
+			const restoreSummary = resummariseRow(thread, {
+				mailbox: viewMailbox?.(thread),
+				outgoing: outgoing?.(),
+			})
 			return () => {
 				thread.messages.splice(mailIndex, 0, mail)
 				restoreSummary()

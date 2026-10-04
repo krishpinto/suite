@@ -58,7 +58,7 @@ def delta(current: float | None, baseline: float | None) -> str:
         return ""
     change = current - baseline
     if abs(change) < 0.05:
-        return " (no change)"
+        return " (+0%)"
     return f" ({change:+.1f}%)"
 
 
@@ -83,6 +83,14 @@ def summary_metric(label: str, coverage: Coverage | None, baseline: Coverage | N
         return f"{label} unavailable"
     baseline_rate = rate(baseline.covered, baseline.total) if baseline else None
     return f"{label} {current:.1f}%{delta(current, baseline_rate)}"
+
+
+def effective_coverage(
+    current: Coverage | None, baseline: Coverage | None, test_status: str
+) -> Coverage | None:
+    if current is None and test_status == "unchanged":
+        return baseline
+    return current
 
 
 def render(
@@ -128,17 +136,23 @@ def main() -> None:
     parser.add_argument("--frontend", required=True)
     parser.add_argument("--backend-baseline", required=True)
     parser.add_argument("--frontend-baseline", required=True)
+    parser.add_argument("--backend-status", required=True)
+    parser.add_argument("--frontend-status", required=True)
     parser.add_argument("--baseline-ref", required=True)
     parser.add_argument("--run-url", required=True)
     parser.add_argument("--commit", required=True)
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
 
+    backend = parse_coverage(args.backend)
+    frontend = parse_coverage(args.frontend)
+    backend_baseline = parse_coverage(args.backend_baseline)
+    frontend_baseline = parse_coverage(args.frontend_baseline)
     report = render(
-        parse_coverage(args.backend),
-        parse_coverage(args.frontend),
-        parse_coverage(args.backend_baseline),
-        parse_coverage(args.frontend_baseline),
+        effective_coverage(backend, backend_baseline, args.backend_status),
+        effective_coverage(frontend, frontend_baseline, args.frontend_status),
+        backend_baseline,
+        frontend_baseline,
         args.baseline_ref,
         args.run_url,
         args.commit,

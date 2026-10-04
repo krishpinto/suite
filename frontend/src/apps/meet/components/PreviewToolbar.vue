@@ -46,7 +46,7 @@
 	</Transition>
 
 	<SettingsDialog
-		v-model="showSettingsDialog"
+		v-model:open="showSettingsDialog"
 		:meetingId="meetingId"
 		:isPreview="true"
 		@device-changed="$emit('device-changed', $event)"
@@ -54,18 +54,20 @@
 </template>
 
 <script setup lang="ts">
-import { usePlatform } from "../composables/usePlatform";
+import { onScopeDispose } from "vue";
+import { useRootStore } from "@/stores/root";
 import MeetCameraIcon from "../icons/MeetCameraIcon.vue";
 import MeetCameraOffIcon from "../icons/MeetCameraOffIcon.vue";
 import MeetMicIcon from "../icons/MeetMicIcon.vue";
 import MeetMicOffIcon from "../icons/MeetMicOffIcon.vue";
 import MeetSettingsIcon from "../icons/MeetSettingsIcon.vue";
+import { getPlatform } from "../utils/device";
 import SettingsDialog from "./settings/SettingsDialog.vue";
 import ToolbarButton from "./ToolbarButton.vue";
 
-const $platform = usePlatform();
+const $platform = getPlatform();
 
-defineProps({
+const props = defineProps({
 	isMicOn: {
 		type: Boolean,
 		required: true,
@@ -94,4 +96,24 @@ const showSettingsDialog = defineModel({
 	type: Boolean,
 	default: false,
 });
+
+const unregisterPaletteGroups = useRootStore().registerPaletteGroups(
+	"meet-preview-toolbar",
+	() => props.cameraPermissionGranted || props.microphonePermissionGranted ? [
+		{
+			commands: [
+				{
+					id: "meet-settings",
+					label: "Settings",
+					shortcut: "Mod+Shift+Comma",
+					enterHint: "open meet settings",
+					icon: "lucide-settings",
+					keywords: ["audio", "video", "camera", "microphone", "devices"],
+					run: () => (showSettingsDialog.value = true),
+				},
+			],
+		},
+	] : [],
+);
+onScopeDispose(unregisterPaletteGroups);
 </script>

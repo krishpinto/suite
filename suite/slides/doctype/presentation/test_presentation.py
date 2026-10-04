@@ -7,6 +7,7 @@ import os
 import frappe
 from frappe.client import set_value
 from frappe.tests import IntegrationTestCase
+from frappe.utils import cstr
 from PIL import Image
 
 from suite.slides.doctype.presentation.presentation import (
@@ -20,6 +21,7 @@ from suite.slides.doctype.presentation.presentation import (
     save_base64_image,
     save_presentation_thumbnail,
     update_slide_attachments,
+    update_theme,
     update_title,
 )
 from suite.slides.tests.utils import (
@@ -59,6 +61,7 @@ class TestPresentationSecurity(IntegrationTestCase):
             (get_updated_json, self.owner_presentation, []),
             (save_presentation_thumbnail, self.owner_presentation, PNG_1PX),
             (update_title, self.owner_presentation, "Hijacked"),
+            (update_theme, self.owner_presentation, "hijacked-theme"),
             (get_public_presentation, self.owner_presentation),
             (delete_presentation, self.owner_presentation),
         ]
@@ -288,3 +291,31 @@ class TestSlideRows(IntegrationTestCase):
         self.assertEqual(len(slides), 2)
         self.assertEqual(slides[0].name, kept.name)
         self.assertNotIn(slides[1].name, ("", removed.name))
+
+
+class TestVersionHandshake(IntegrationTestCase):
+    """Endpoints report the modified they saved over, so a stale editor can tell it must reload."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        ensure_user(OWNER)
+
+    def assert_base_reported(self, endpoint, *args):
+        with self.set_user(OWNER):
+            presentation = make_presentation("Version Handshake Presentation")
+            before = cstr(presentation.modified)
+            result = endpoint(presentation.name, *args)
+
+        self.assertEqual(cstr(result["base_modified"]), before)
+        self.assertNotEqual(cstr(result["modified"]), before)
+        self.assertEqual(
+            cstr(result["modified"]),
+            cstr(frappe.db.get_value("Presentation", presentation.name, "modified")),
+        )
+
+    def test_update_title_reports_the_base_it_saved_over(self):
+        self.assert_base_reported(update_title, "Renamed")
+
+    def test_update_theme_reports_the_base_it_saved_over(self):
+        self.assert_base_reported(update_theme, "another-theme")

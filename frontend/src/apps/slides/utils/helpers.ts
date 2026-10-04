@@ -2,41 +2,6 @@ import DOMPurify from 'dompurify'
 
 import { getAttachmentUrl } from './mediaUploads'
 
-let isClicked = false
-let delay = 200
-let clickTimeout: ReturnType<typeof setTimeout> | null = null
-
-const handleSingleAndDoubleClick = (
-	event: MouseEvent,
-	singleClickHandler: Function,
-	doubleClickHandler: Function,
-	...args: any[]
-) => {
-	// if user clicked a second time clear timeout and register as double click
-	if (isClicked) {
-		clickTimeout && clearTimeout(clickTimeout)
-		isClicked = false
-		doubleClickHandler(event, ...args)
-	}
-	// if user clicked once set timeout for single click function
-	// if user doesn't click again within the delay register as single click
-	else {
-		isClicked = true
-		clickTimeout = setTimeout(function () {
-			isClicked = false
-			singleClickHandler(event, ...args)
-		}, delay)
-	}
-}
-
-const debounce = (fn: Function, wait = 300) => {
-	let timer: ReturnType<typeof setTimeout>
-	return function (this: any, ...args: any[]) {
-		clearTimeout(timer)
-		timer = setTimeout(() => fn.apply(this, args), wait)
-	}
-}
-
 const generateUniqueId = () => {
 	return Math.random().toString(36).slice(2, 11)
 }
@@ -53,15 +18,6 @@ const setCursorPositionAtEnd = (e: Event) => {
 
 	selection.removeAllRanges()
 	selection.addRange(range)
-}
-
-const handleScrollBarWheelEvent = (e: WheelEvent) => {
-	// allow normal scroll behaviour
-	if (!isCmdOrCtrl(e)) return
-
-	// prevent zoom event from triggering
-	e.preventDefault()
-	e.stopPropagation()
 }
 
 const cloneObj = (obj: any) => JSON.parse(JSON.stringify(obj))
@@ -82,6 +38,8 @@ const getDocFromHTML = (html: string) => {
 	const parser = new DOMParser()
 	return parser.parseFromString(html, 'text/html')
 }
+
+const hasListMarkup = (html: string) => !!html && /<(ul|ol|li)[\s>]/i.test(html)
 
 const sanitizeSlideHTML = (html: string) => {
 	return DOMPurify.sanitize(html, {
@@ -117,16 +75,38 @@ const isCmdOrCtrl = (e: KeyboardEvent | MouseEvent) => {
 
 const normalizeRotation = (deg: number) => ((deg % 360) + 360) % 360
 
+// runs the first call now and the latest of any that follow at the next frame
+const throttleToFrame = (fn: (...args: any[]) => void) => {
+	let frame: number | null = null
+	let latest: any[] | null = null
+
+	const flush = () => {
+		frame = null
+		if (latest) run(...latest)
+	}
+
+	const run = (...args: any[]) => {
+		if (frame) {
+			latest = args
+			return
+		}
+		latest = null
+		frame = requestAnimationFrame(flush)
+		fn(...args)
+	}
+
+	return run
+}
+
 export {
-	handleSingleAndDoubleClick,
-	debounce,
 	generateUniqueId,
 	setCursorPositionAtEnd,
-	handleScrollBarWheelEvent,
 	cloneObj,
 	getThumbnailCardStyles,
 	getDocFromHTML,
+	hasListMarkup,
 	sanitizeSlideHTML,
 	isCmdOrCtrl,
 	normalizeRotation,
+	throttleToFrame,
 }

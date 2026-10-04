@@ -7,6 +7,8 @@ import { useTheme as useSuiteTheme } from '@/composables/useTheme'
 import { matchesScreenedValue, raiseOptimisticToast, raiseToast } from '@/apps/mail/utils'
 import router from '@/apps/mail/router'
 import { userStore } from '@/apps/mail/stores/user'
+import { createSwipeGesture } from '@/apps/mail/utils/swipeGesture'
+import { useRootStore } from '@/stores/root'
 
 import type { ComposeMailData, Identity, ScreenedAddress } from '@/apps/mail/types'
 
@@ -27,7 +29,7 @@ export const useReadingPane = () => {
 }
 
 /**
- * Flipping Split View from the list toolbar. Appearance settings writes the same field behind a
+ * Flipping Split View from the list toolbar. Mail layout settings writes the same field behind a
  * Save button; this one is a layout switch, so it applies on click — the local value flips first
  * and the whole split re-lays out from it, then rolls back if the write doesn't land.
  */
@@ -100,16 +102,15 @@ export const useSidebar = () => {
 }
 
 // Horizontal swipe-to-page detection, shared by the mailbox thread pane and the screener
-// preview: left → onSwipe(1) (next), right → onSwipe(-1). Judged on touchend (passive) so
-// vertical scrolling is never delayed; a swipe must be decisively horizontal — at least
-// 64px long and twice its vertical drift. Swipes over an email body never reach the pane:
-// EmailContent detects them inside its iframe and re-broadcasts them as `email-swipe`
-// window events, which this subscribes to as well. The time guard dedupes those (every
-// mounted EmailContent re-dispatches the same message) and paces direct swipes alike.
-const SWIPE_MIN_X = 64
-
+// preview: left → onSwipe(1) (next), right → onSwipe(-1). The rule itself lives in
+// createSwipeGesture; this binds it to the touch events and to the view. Judged on
+// touchend (passive) so vertical scrolling is never delayed. Swipes over an email body
+// never reach the pane: EmailContent detects them inside its iframe and re-broadcasts
+// them as `email-swipe` window events, which this subscribes to as well. The time guard
+// dedupes those (every mounted EmailContent re-dispatches the same message) and paces
+// direct swipes alike.
 export const useSwipeNav = (enabled: () => boolean, onSwipe: (offset: 1 | -1) => void) => {
-	let origin: { x: number; y: number } | null = null
+	const gesture = createSwipeGesture()
 	let lastSwipeAt = 0
 
 	const swipe = (offset: 1 | -1) => {
@@ -121,19 +122,18 @@ export const useSwipeNav = (enabled: () => boolean, onSwipe: (offset: 1 | -1) =>
 	}
 
 	const onTouchStart = (e: TouchEvent) => {
-		origin =
-			enabled() && e.touches.length === 1
-				? { x: e.touches[0].clientX, y: e.touches[0].clientY }
-				: null
+		if (!enabled()) return gesture.cancel()
+		gesture.start(e.touches[0].clientX, e.touches[0].clientY, e.touches.length)
+	}
+
+	const onTouchMove = (e: TouchEvent) => {
+		const touch = e.touches[0]
+		if (touch) gesture.move(touch.clientX, touch.clientY)
 	}
 
 	const onTouchEnd = (e: TouchEvent) => {
-		if (!origin) return
-		const dx = e.changedTouches[0].clientX - origin.x
-		const dy = e.changedTouches[0].clientY - origin.y
-		origin = null
-		if (Math.abs(dx) < SWIPE_MIN_X || Math.abs(dx) < Math.abs(dy) * 2) return
-		swipe(dx < 0 ? 1 : -1)
+		const offset = gesture.end(e.changedTouches[0].clientX, e.changedTouches[0].clientY)
+		if (offset) swipe(offset)
 	}
 
 	const onEmailSwipe = (e: Event) => swipe((e as CustomEvent).detail === 'left' ? 1 : -1)
@@ -141,7 +141,7 @@ export const useSwipeNav = (enabled: () => boolean, onSwipe: (offset: 1 | -1) =>
 	onMounted(() => window.addEventListener('email-swipe', onEmailSwipe))
 	onUnmounted(() => window.removeEventListener('email-swipe', onEmailSwipe))
 
-	return { onTouchStart, onTouchEnd }
+	return { onTouchStart, onTouchMove, onTouchEnd }
 }
 
 // Mobile folder bottom sheet — shared so both the header title (mailbox views)
@@ -153,6 +153,40 @@ export const useFolderSheet = () => {
 	const closeFolderSheet = () => (isFolderSheetOpen.value = false)
 
 	return { isFolderSheetOpen, openFolderSheet, closeFolderSheet }
+}
+
+// The search page's address — the one place that knows it is the mailbox route with the virtual
+// 'search' mailbox — for whoever sends someone there: the palette, the results header, the phone.
+export const mailSearchRoute = (accountId: string, query: Record<string, string> = {}) => ({
+	name: 'mail-mailbox',
+	params: { accountId, mailbox: 'search' },
+	query,
+})
+
+export const useMobileSearch = () => {
+	const route = useRoute()
+	const router = useRouter()
+	const store = userStore()
+	const root = useRootStore()
+
+	const isSearchRoute = computed(
+		() => route.name === 'mail-mailbox' && route.params.mailbox === 'search',
+	)
+
+	// Keep the search route behind the palette so browser Back dismisses search and the
+	// route watcher in the tab bar closes the palette.
+	const openSearch = async () => {
+		if (!isSearchRoute.value) await router.push(mailSearchRoute(store.accountId))
+		root.paletteOpen = true
+	}
+
+	// `all_accounts` is the search's scope, not a condition: a route carrying only that has no
+	// search on it.
+	const hasSearchQuery = computed(() =>
+		Object.keys(route.query).some((key) => key !== 'all_accounts'),
+	)
+
+	return { hasSearchQuery, isSearchRoute, openSearch }
 }
 
 // Mobile selection mode — MailboxView owns the selection; the tab bar and FAB
@@ -194,58 +228,6 @@ export const useTextEditorButtons = (dropAlignment: () => boolean = () => false)
 	])
 
 	return { buttons }
-}
-
-/**
- * How much of the on-screen keyboard is covering the layout viewport, as insets for holding a
- * full-screen pane clear of it.
- *
- * iOS leaves the layout viewport full-height when the keyboard opens and slides the visible part
- * around underneath it, so `position: fixed; inset: 0` runs on behind the keyboard and has to be
- * held off it by hand:
- *
- * - `bottom` is the strip the keyboard covers, so a pane ends where the keyboard starts.
- * - `top` is how far iOS has panned to reveal a focused field, so the pane rides that pan instead of
- *   being dragged off the top of the screen.
- *
- * `interactive-widget=resizes-content` (index.html) is supposed to make both of these unnecessary by
- * shrinking the layout viewport itself. It did not, on the iOS this was built against: dropping the
- * `bottom` inset put the toolbar straight back behind the keyboard. Treat these as load-bearing.
- */
-export const useKeyboardInsets = () => {
-	const top = ref(0)
-	const bottom = ref(0)
-	/** The visible height — what's left of the screen once the keyboard has taken its share. */
-	const height = ref(window.innerHeight)
-
-	const update = () => {
-		const viewport = window.visualViewport
-		if (!viewport) return
-
-		height.value = viewport.height
-		top.value = viewport.offsetTop
-		// Against the layout viewport, not innerHeight: innerHeight tracks the visual viewport on iOS,
-		// which would make this always 0 and the fallback a no-op on the browsers that need it.
-		const covered = document.documentElement.clientHeight - viewport.height - viewport.offsetTop
-		bottom.value = Math.max(0, Math.round(covered))
-	}
-
-	onMounted(() => {
-		update()
-		// `resize` is the keyboard opening and closing; `scroll` is iOS panning what's left of the
-		// viewport. Missing the second is what lets a pane drift off the top of the screen.
-		window.visualViewport?.addEventListener('resize', update)
-		window.visualViewport?.addEventListener('scroll', update)
-		window.addEventListener('resize', update)
-	})
-
-	onUnmounted(() => {
-		window.visualViewport?.removeEventListener('resize', update)
-		window.visualViewport?.removeEventListener('scroll', update)
-		window.removeEventListener('resize', update)
-	})
-
-	return { top, bottom, height }
 }
 
 const keyboardOpen = ref(false)
@@ -319,9 +301,9 @@ export const useUndo = () => {
 		outlivingAction = outlivesView ? action : undefined
 		// Clearing the undo with no replacement toast (e.g. leaving the mailbox) leaves a lingering toast
 		// whose "Undo" button is now dead — dismiss toasts. When a new action is set instead, the toast it
-		// raises right after (via raiseOptimisticToast/raisePromiseToast) does the removeAll, and doing it
+		// raises right after (via raiseOptimisticToast/raisePromiseToast) does the dismiss, and doing it
 		// here too would dismiss the reconcile paths' in-flight loading toast — so only clear on undefined.
-		if (!action) toast.removeAll()
+		if (!action) toast.dismiss()
 	}
 
 	// What a view does on the way out: its own undo goes, toast and all, so nothing can undo into a
@@ -382,7 +364,7 @@ export const useListReload = () => ({
 
 // Shared state for the "Block sender?" prompt shown after marking/moving mail to Junk. A single
 // <ScreenedEmailAddressModal> (rendered in MailboxView) reacts to this, so any view can open it.
-export interface BlockableSender {
+interface BlockableSender {
 	name?: string
 	email: string
 }
@@ -592,5 +574,12 @@ export const useSettings = () => {
 
 	return { showSettings, settingsTab, openSettings }
 }
+
+const showShortcuts = ref(false)
+
+export const useShortcuts = () => ({
+	showShortcuts,
+	openShortcuts: () => (showShortcuts.value = true),
+})
 
 export const useTheme = () => useSuiteTheme()

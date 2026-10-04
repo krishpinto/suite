@@ -91,6 +91,7 @@
 
 <script setup lang="ts">
 import { computed, ref, useTemplateRef } from 'vue'
+import { appPageMeta } from '@/utils/documentTitle'
 import { useRouter } from 'vue-router'
 import { useDebounceFn, watchDebounced } from '@vueuse/core'
 import { Pin, Trash2 } from 'lucide-vue-next'
@@ -183,7 +184,7 @@ const loadMoreContacts = useDebounceFn((e) => {
 
 const addressBookDisplay = computed(() => addressBook.doc?._name || addressBookName)
 
-usePageMeta(() => ({ title: addressBookDisplay.value }))
+usePageMeta(() => appPageMeta(addressBookDisplay.value, 'Mail'))
 
 const breadcrumbs = computed(() => [
 	{ label: __('Address Books'), route: '/mail/address-books' },
@@ -241,14 +242,14 @@ const removeContacts = createResource({
 const deleteAddressBookOptions = computed(() => ({
 	title: __('Delete Address Book'),
 	message: __('Are you sure you want to delete {0}?', [addressBook.doc?._name]),
-	icon: { name: 'lucide-alert-triangle', theme: 'amber' },
+	icon: 'lucide-alert-triangle', theme: 'amber',
 	actions: [{ label: __('Confirm'), variant: 'solid', onClick: deleteAddressBook.submit }],
 }))
 
 const removeContactsOptions = computed(() => ({
 	title: __('Remove Contacts'),
 	message: __('Are you sure you want to remove the selected contacts?'),
-	icon: { name: 'lucide-alert-triangle', theme: 'amber' },
+	icon: 'lucide-alert-triangle', theme: 'amber',
 	actions: [{ label: __('Confirm'), variant: 'solid', onClick: removeContacts.submit }],
 }))
 

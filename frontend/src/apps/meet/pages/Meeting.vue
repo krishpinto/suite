@@ -83,9 +83,10 @@
 				:meetingTitle="previewTitle"
 				:isCameraOn="mediaState.isCameraOn"
 				:isMicOn="mediaState.isMicOn"
+				:mediaStream="mediaState.localStream"
 				:cameraPermissionGranted="mediaState.cameraPermissionGranted"
 				:microphonePermissionGranted="mediaState.microphonePermissionGranted"
-				:isConnecting="sfuConnection.isConnecting.value"
+				:isConnecting="isInitializingPreview || sfuConnection.isConnecting.value"
 				:userInitials="currentUser.userInitials.value"
 				:userAvatar="currentUser.userAvatar.value"
 				:currentUserName="
@@ -117,7 +118,7 @@
 				>
 					<div class="flex flex-col min-h-0 relative">
 						<!-- Video area -->
-						<div class="p-2.5 flex flex-col flex-1 min-h-0 text-white">
+						<div class="p-2.5 flex flex-col flex-1 min-h-0 text-white relative">
 							<div
 								v-if="e2eeJoinPendingMessage"
 								class="flex h-full flex-col items-center justify-center px-4 py-12 text-center"
@@ -139,6 +140,13 @@
 								</Badge>
 							</div>
 							<MeetingLayout v-else @open-people-panel="togglePeople" />
+							<CaptionOverlay
+								v-if="!e2eeJoinPendingMessage"
+								:is-captions-enabled="isCaptionsEnabled"
+								:lines="captionLines"
+								:participants="participantStore.participants"
+								:current-user="currentUser.currentUser.value"
+							/>
 						</div>
 					</div>
 
@@ -223,6 +231,8 @@
 						:statsVisible="showStatsForNerds"
 						:isHandRaised="isHandRaised"
 						:isReactionPickerOpen="isReactionPickerOpen"
+						:isCaptionsEnabled="isCaptionsEnabled"
+						:areCaptionsAvailable="areCaptionsAvailable"
 						@update:isReactionPickerOpen="isReactionPickerOpen = $event"
 						:meetingId="meetingId"
 						:meetingTitle="meetingTitle"
@@ -240,9 +250,10 @@
 						@toggle-screen-share="mediaControls.toggleScreenShare()"
 						@toggle-fullscreen="toggleFullscreen"
 						@toggle-raise-hand="raiseHand.toggleRaiseHand()"
+						@toggle-captions="toggleCaptions"
 						@report-problem="handleReportProblem"
 						@toggle-stats="toggleStatsForNerds"
-						@end-call="sfuConnection.endCall()"
+						@end-call="confirmAndEndCall"
 						@device-changed="handleDeviceChanged"
 						@visibility-change="isToolbarVisible = $event"
 						@manage-recording="handleRecordingAction"
@@ -282,10 +293,28 @@
 </template>
 
 <script setup lang="ts">
-import { Badge, Button, createResource, frappeRequest, toast } from "frappe-ui";
-import { computed, h, onMounted, onUnmounted, provide, ref, toRef, watch } from "vue";
-import { useRoute, useRouter } from "vue-router";
+import { Badge, Button, toast, useCall, useDoc, usePageMeta } from "frappe-ui";
+import {
+	computed,
+	h,
+	onMounted,
+	onScopeDispose,
+	onUnmounted,
+	provide,
+	ref,
+	toRef,
+	watch,
+} from "vue";
+import {
+	onBeforeRouteLeave,
+	onBeforeRouteUpdate,
+	useRoute,
+	useRouter,
+} from "vue-router";
+import { submit } from "../utils/request";
+import { useRootStore } from "@/stores/root";
 
+import CaptionOverlay from "../components/CaptionOverlay.vue";
 import ChatPanel from "../components/ChatPanel.vue";
 import JoinRequestNotifications from "../components/JoinRequestNotifications.vue";
 import LobbyOverlay from "../components/LobbyOverlay.vue";
@@ -301,6 +330,7 @@ import PeoplePanel from "../components/PeoplePanel.vue";
 import RejectionOverlay from "../components/RejectionOverlay.vue";
 import StatsForNerdsOverlay from "../components/StatsForNerdsOverlay.vue";
 import { useBackgroundEffects } from "../composables/useBackgroundEffects";
+import { useCaptions } from "../composables/useCaptions";
 import { useChat } from "../composables/useChat";
 import { useChatStore } from "../composables/useChatStore";
 import { useConnectionState } from "../composables/useConnectionState";
@@ -316,7 +346,6 @@ import {
 	useMediaState,
 } from "../composables/useMediaState";
 import { provideMeetingContext } from "../composables/useMeetingContext";
-import { useMeetingDoc } from "../composables/useMeetingDoc";
 import {
 	useMeetingHandlers,
 } from "../composables/useMeetingHandlers";
@@ -338,8 +367,6 @@ import {
 } from "../composables/useSFUConnection";
 import {
 	autoHideToolbar,
-	selectedCameraId,
-	selectedMicId,
 	selectedSpeakerId,
 } from "../data/mediaPreferences";
 import {
@@ -347,6 +374,8 @@ import {
 	showStatsForNerds,
 } from "../data/statsPreferences";
 import { session, userResource } from "@/boot/session";
+import { appPageMeta } from "@/utils/documentTitle";
+import { confirmLeave } from "@/utils/confirmLeave";
 import { useSocket } from "../socket";
 import { deviceManager } from "../utils/media/DeviceManager";
 import type { Participant } from "../utils/media/ParticipantManager";
@@ -357,6 +386,13 @@ import { usePollStore } from "../composables/usePollStore.js";
 const route = useRoute();
 const router = useRouter();
 const meetingId = computed(() => route.params.meetingId as string);
+
+interface MeetingDocument {
+	name: string;
+	title?: string;
+	owner?: string;
+	co_hosts?: { user: string }[];
+}
 
 function redirectToLogin() {
 	const path = window.location.pathname.startsWith("/meet")
@@ -374,6 +410,25 @@ async function copyMeetingLink() {
 	}
 }
 
+const unregisterPaletteGroups = useRootStore().registerPaletteGroups(
+	"meet-meeting",
+	[
+		{
+			commands: [
+				{
+					id: "meet-copy-link",
+					label: "Copy meeting link",
+					enterHint: "copy meeting link",
+					icon: "lucide-link-2",
+					keywords: ["share", "url"],
+					run: copyMeetingLink,
+				},
+			],
+		},
+	],
+);
+onScopeDispose(unregisterPaletteGroups);
+
 // --- Stores (singletons) ---
 const connectionState = useConnectionState();
 const currentUser = useCurrentUser();
@@ -390,15 +445,39 @@ const gridLayout = useGridLayout(mediaState);
 const notifiedLobbyUsers = ref(new Set<string>());
 
 // --- Meeting doc ---
-const {
-	getMeetingDoc,
-	meetingTitle,
-	meetingOwner,
-	isCurrentUserHost,
-	isCurrentUserCohost,
-	meetingCoHosts,
-} = useMeetingDoc();
-const meetingDoc = getMeetingDoc(meetingId.value);
+const meetingDoc = useDoc<MeetingDocument, {
+	approveJoinRequest: (params: { user_id: string }) => unknown;
+	approveAllJoinRequests: () => unknown;
+	rejectJoinRequest: (params: { user_id: string }) => unknown;
+	getWaitingRoomDetails: () => unknown;
+	banGuest: (params: { guest_id: string }) => unknown;
+	promoteToCohost: (params: { user_id: string }) => unknown;
+}>({
+	doctype: "Meet Room",
+	name: meetingId,
+	immediate: session.isLoggedIn,
+	methods: {
+		approveJoinRequest: "approve_join_request",
+		approveAllJoinRequests: "approve_all_join_requests",
+		rejectJoinRequest: "reject_join_request",
+		getWaitingRoomDetails: "get_waiting_room_details",
+		banGuest: "ban_guest",
+		promoteToCohost: "promote_to_cohost",
+	},
+});
+const meetingTitle = computed(
+	() => meetingDoc.doc?.title || meetingDoc.doc?.name || meetingId.value,
+);
+const meetingOwner = computed(() => meetingDoc.doc?.owner || "");
+const meetingCoHosts = computed(
+	() => meetingDoc.doc?.co_hosts?.map((row) => row.user) || [],
+);
+const isCurrentUserHost = computed(
+	() => Boolean(session.user?.sessionUser && session.user.sessionUser === meetingOwner.value),
+);
+const isCurrentUserCohost = computed(
+	() => Boolean(session.user?.sessionUser && meetingCoHosts.value.includes(session.user.sessionUser)),
+);
 const recording = useRecording(meetingId.value);
 const recordingDialogOpen = ref(false);
 const recordingStopDialogOpen = ref(false);
@@ -436,20 +515,25 @@ async function confirmRecordingStart() {
 		throw error;
 	}
 }
-const previewDetails = createResource({
-	url: "suite.meet.api.meeting.get_public_meeting_preview",
+const previewDetails = useCall<{ title?: string }, { meeting_id: string }>({
+	url: "/api/v2/method/suite.meet.api.meeting.get_public_meeting_preview",
 	params: { meeting_id: meetingId.value },
-	auto: !session.isLoggedIn,
+	immediate: !session.isLoggedIn,
+});
+const checkMeetingAccess = useCall<AccessData, { meeting_id: string }>({
+	url: "/api/v2/method/suite.meet.api.meeting.check_meeting_access",
+	immediate: false,
 });
 const previewTitle = computed(
 	() => meetingDoc.doc?.title || previewDetails.data?.title || meetingId.value,
 );
+usePageMeta(() => appPageMeta(previewTitle.value, "Meet"));
 
 watch(
-	() => meetingDoc.get.error,
+	() => meetingDoc.error,
 	(error) => {
 		if (error && !previewDetails.data && !previewDetails.loading) {
-			previewDetails.fetch();
+			void previewDetails.reload();
 		}
 	},
 );
@@ -529,6 +613,7 @@ const sfuConnection = useSFUConnection({
 	mediaState,
 	participantStore,
 	lobbyStore,
+	meetingDoc,
 	gridLayout,
 	meetingId: meetingId.value,
 	notifiedLobbyUsers,
@@ -601,6 +686,8 @@ const sfuConnection = useSFUConnection({
 	onActiveSpeakerChanged: (participantIds: string[]) => {
 		participantStore.activeSpeakerIds = participantIds;
 	},
+	onRoomRejoined: () => void captions.restoreCaptionSubscription(),
+	onE2EERequired: () => captions.disableCaptionsForE2EE(),
 	onRecordingState: recording.syncState,
 	onRecordingEnabled: recording.setGlobalEnabled,
 	onCohostPromoted: () => meetingDoc.reload(),
@@ -644,25 +731,6 @@ const mediaControls = useMediaControls({
 	deviceManager,
 	backgroundEffects,
 	noiseCancellation,
-	toast,
-	mediaPreferences: {
-		micEnabled: ref(false),
-		cameraEnabled: ref(false),
-		selectedCameraId,
-		selectedMicId,
-		selectedSpeakerId,
-		pushToTalkEnabled: ref(false),
-		noiseCancellationEnabled: ref(false),
-		setMicEnabled: (_v: boolean) => {
-			/* handled via mediaState */
-		},
-		setCameraEnabled: (_v: boolean) => {
-			/* handled via mediaState */
-		},
-		setSelectedCameraId: () => {},
-		setSelectedMicId: () => {},
-		setSelectedSpeakerId: () => {},
-	},
 });
 
 import { meetingControls } from "../composables/useKeyboardShortcuts";
@@ -711,10 +779,20 @@ const raiseHand = useRaiseHand({
 	sfuClient: sfuConnection.sfuClient,
 });
 
+const captions = useCaptions({
+	sfuClient: sfuConnection.sfuClient,
+});
+const {
+	isAvailable: areCaptionsAvailable,
+	isCaptionsEnabled,
+	captionLines,
+	toggleCaptions,
+} = captions;
+
 // --- Lobby ---
 const lobby = useLobby({
 	lobbyStore,
-	meetingId: meetingId.value as string,
+	meetingDoc,
 });
 
 type AccessData = { allow_guest?: boolean; host_only_chat?: boolean };
@@ -783,6 +861,41 @@ const showPreview = computed(() => {
 	const inPreview = connectionState.isInPreview;
 	const joinRequestRejected = lobbyStore.isJoinRequestRejected;
 	return inPreview || joinRequestRejected;
+});
+
+const canLeaveMeeting = ref(false);
+let pendingLeaveConfirmation: Promise<boolean> | null = null;
+
+async function confirmMeetingLeave() {
+	if (
+		canLeaveMeeting.value ||
+		(!sfuConnection.isSetupComplete.value && !sfuConnection.isConnecting.value)
+	) return true;
+	if (pendingLeaveConfirmation) return pendingLeaveConfirmation;
+
+	pendingLeaveConfirmation = confirmLeave({
+		title: "Leave meeting?",
+		message: "You will be disconnected from the meeting.",
+		confirmLabel: "Leave meeting",
+		focusConfirm: true,
+	});
+	try {
+		return await pendingLeaveConfirmation;
+	} finally {
+		pendingLeaveConfirmation = null;
+	}
+}
+
+async function confirmAndEndCall() {
+	if (!(await confirmMeetingLeave())) return;
+	canLeaveMeeting.value = true;
+	await sfuConnection.endCall();
+}
+
+onBeforeRouteLeave(confirmMeetingLeave);
+onBeforeRouteUpdate((to, from) => {
+	if (to.params.meetingId === from.params.meetingId) return true;
+	return confirmMeetingLeave();
 });
 
 // Soft connecting feedback: only if join takes longer than 5s (no full-page spinner).
@@ -880,6 +993,7 @@ const isHandRaised = computed(() => {
 });
 
 // --- Refs ---
+const isInitializingPreview = ref(true);
 const isReactionPickerOpen = ref(false);
 const isFullscreen = ref(false);
 const isToolbarVisible = ref(true);
@@ -1055,6 +1169,7 @@ onMounted(async () => {
 	lobbyStore.$reset();
 	reactionStore.$reset();
 	raiseHandStore.$reset();
+	captions.reset();
 	gridLayout.resetGridLayout();
 	currentUser.resetCurrentUser();
 	e2eeState.reset();
@@ -1070,23 +1185,21 @@ onMounted(async () => {
 	// Check meeting access for unauthenticated users
 	if (!session.isLoggedIn) {
 		try {
-			const accessData = await frappeRequest({
-				url: "suite.meet.api.meeting.check_meeting_access",
-				params: {
-					meeting_id: meetingId.value,
-				},
+			const accessData = await submit(checkMeetingAccess, {
+				meeting_id: meetingId.value,
 			});
 
-			if ((accessData as AccessData).host_only_chat !== undefined) {
-				chatStore.hostOnlyChat = !!(accessData as AccessData).host_only_chat;
+			if (accessData?.host_only_chat !== undefined) {
+				chatStore.hostOnlyChat = !!accessData.host_only_chat;
 			}
-			if (!(accessData as { allow_guest?: boolean }).allow_guest) {
+			if (!accessData?.allow_guest) {
 				const loginUrl = `/login?redirect-to=${encodeURIComponent(`/meet/${meetingId.value}`)}`;
 				window.location.href = loginUrl;
 				return;
 			}
 		} catch (error) {
 			console.error("Failed to check meeting access:", error);
+			isInitializingPreview.value = false;
 			return;
 		}
 	}
@@ -1104,7 +1217,7 @@ onMounted(async () => {
 		if (selectedSpeakerId.value) {
 			await mediaControls.applySpeakerDevice();
 		}
-		connectionState.isInPreview = true;
+		isInitializingPreview.value = false;
 		return;
 	}
 
@@ -1122,6 +1235,8 @@ onMounted(async () => {
 	if (selectedSpeakerId.value) {
 		await mediaControls.applySpeakerDevice();
 	}
+
+	isInitializingPreview.value = false;
 
 	// Auto-join if just created
 	if (wasJustCreated) {

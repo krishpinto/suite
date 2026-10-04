@@ -1,4 +1,4 @@
-export const POLYGON_SIDES = { diamond: 4, triangle: 3, pentagon: 5 }
+const POLYGON_SIDES = { diamond: 4, triangle: 3, pentagon: 5 }
 
 export const isPolygonShape = (shapeType) => shapeType in POLYGON_SIDES
 
@@ -21,4 +21,13 @@ export const getPolygonVertices = (shapeType, width, height, strokeInset = 0) =>
 	const scaleY = (y) => strokeInset + ((y - yMin) / (yMax - yMin)) * (height - 2 * strokeInset)
 
 	return unitVertices.map((v) => ({ x: scaleX(v.x), y: scaleY(v.y) }))
+}
+
+// the top shifts with the stroke so the visible line stays put
+export const setStrokeWidthInPlace = (element, value) => {
+	if (element.shapeType === 'line' && !element.points) {
+		element.top += (element.strokeWidth - value) / 2
+		element.height = value
+	}
+	element.strokeWidth = value
 }

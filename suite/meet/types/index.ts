@@ -18,6 +18,74 @@ export interface RecordingProofRequest {
 	signature: string;
 }
 
+export interface RecorderStageParticipant {
+	participant_id: string;
+	name: string;
+	avatar?: string;
+	audio_enabled: boolean;
+	video_enabled: boolean;
+}
+
+export interface RecorderStageProducer {
+	producer_id: string;
+	participant_id: string;
+	kind: 'audio' | 'video';
+	paused: boolean;
+	is_screen: boolean;
+	observed_at: string;
+}
+
+export interface RecorderStageSnapshot {
+	protocol_version: 1;
+	room_id: string;
+	cursor: number;
+	observed_at: string;
+	participants: RecorderStageParticipant[];
+	producers: RecorderStageProducer[];
+	raised_hands: Record<string, string>;
+	active_speaker_ids: string[];
+}
+
+export type RecorderStageProjectionPayload =
+	| { type: 'participant_joined'; participant: RecorderStageParticipant }
+	| { type: 'participant_updated'; participant: RecorderStageParticipant }
+	| { type: 'participant_left'; participant_id: string }
+	| { type: 'producer_created'; producer: RecorderStageProducer }
+	| { type: 'producer_updated'; producer_id: string; paused: boolean }
+	| {
+			type: 'producer_closed';
+			producer_id: string;
+			participant_id: string;
+			is_screen: boolean;
+	  }
+	| {
+			type: 'media_control';
+			participant_id: string;
+			action: MediaControlAction;
+	  }
+	| { type: 'active_speaker'; participant_ids: string[] }
+	| { type: 'hand_raised'; participant_id: string; raised: boolean }
+	| { type: 'reaction'; from_user: string; reaction: string }
+	| {
+			type: 'chat_message';
+			message_id: string;
+			message: string;
+			from_user: string;
+			from_name: string;
+	  };
+
+export interface RecorderStageProjectionEvent {
+	protocol_version: 1;
+	room_id: string;
+	cursor: number;
+	observed_at: string;
+	payload: RecorderStageProjectionPayload;
+}
+
+export type RecordingProjectionSnapshotResponse =
+	| { success: true; snapshot: RecorderStageSnapshot }
+	| { success: false; error: string };
+
 export type RecordingProofResponse =
 	| { protocol_version: 1; success: true }
 	| {
@@ -149,6 +217,12 @@ export interface ParticipantJoinedEvent {
 	userData: UserData | Pick<UserData, 'name' | 'avatar'>;
 }
 
+export interface ParticipantUpdatedEvent {
+	roomId: string;
+	participantId: string;
+	userData: UserData;
+}
+
 export interface ParticipantLeftEvent {
 	roomId: string;
 	participantId: string;
@@ -169,6 +243,7 @@ export interface ProducerClosedEvent {
 	roomId: string;
 	producerId: string;
 	participantId: string;
+	kind: ProducerKind;
 	isScreen: boolean;
 	reason?: ProducerCloseReason;
 	source?: ProducerCloseSource;
@@ -257,6 +332,94 @@ export interface E2EESessionMetadata {
 	ecdhPublicKey?: string;
 }
 
+export type E2eeEpochEnvelope =
+	| E2eeEpochKeyPackageRequest
+	| E2eeEpochGenesisRequest
+	| E2eeEpochKeyPackage
+	| E2eeEpochCommitRequest
+	| E2eeEpochCommit
+	| E2eeEpochWelcome
+	| E2eeEpochAck
+	| E2eeEpochResyncRequest
+	| E2eeEpochJoinStatus;
+
+export type E2eeEpochKeyPackageRequest = {
+	type: 'key-package-request';
+	epochNumber: number;
+	reason: 'enable' | 'join' | 'reconnect';
+};
+
+export type E2eeEpochGenesisRequest = {
+	type: 'genesis-request';
+	epochNumber: 1;
+	message: string;
+};
+
+export type E2eeEpochKeyPackage = {
+	type: 'key-package';
+	fromParticipantId: string;
+	fromSenderId: number;
+	epochNumber: number;
+	reason?: 'enable' | 'join' | 'reconnect';
+	keyPackage: string;
+};
+
+export type E2eeEpochCommitRequest = {
+	type: 'commit-request';
+	epochNumber: number;
+	nextEpochNumber: number;
+	membershipDeltaId: string;
+	membershipDeltaHash: string;
+	rosterHash: string;
+	committerSenderId: number;
+	joiningSenderIds: number[];
+	removedSenderIds?: number[];
+};
+
+export type E2eeEpochCommit = {
+	type: 'commit';
+	fromParticipantId: string;
+	fromSenderId: number;
+	previousEpochNumber: number;
+	epochNumber: number;
+	membershipDeltaId: string;
+	membershipDeltaHash: string;
+	rosterHash: string;
+	mlsCommit: string;
+};
+
+export type E2eeEpochWelcome = {
+	type: 'welcome';
+	fromParticipantId: string;
+	fromSenderId: number;
+	toParticipantId: string;
+	toSenderId: number;
+	epochNumber: number;
+	mlsWelcome: string;
+};
+
+export type E2eeEpochAck = {
+	type: 'ack';
+	fromParticipantId: string;
+	fromSenderId: number;
+	epochNumber: number;
+};
+
+export type E2eeEpochResyncRequest = {
+	type: 'resync-request';
+	fromParticipantId: string;
+	fromSenderId: number;
+	knownEpochNumber?: number;
+};
+
+export type E2eeEpochJoinStatus = {
+	type: 'join-status';
+	status: 'pending' | 'failed';
+	reason?: 'waiting-for-admitter' | 'waiting-for-host';
+	epochNumber: number;
+	message: string;
+};
+
 export interface JoinRoomRequest {
 	roomId: string;
 	connectionId?: string;
@@ -310,30 +473,21 @@ export interface LeaveRoomRequest {
 	roomId?: string;
 }
 
-export interface PresenceTokenResponse {
-	auth_token?: string;
-	sfu_url?: string;
-	sfu_port?: number;
-	error?: string;
+export interface TranscriptSegment {
+	participantId: string;
+	participantName?: string;
+	text: string;
+	isFinal: boolean;
+	timestamp: string;
+	segmentStart: number;
+	segmentEnd: number;
 }
 
-export interface PresenceParticipant extends PreviewParticipantInfo {
-	user_id?: string;
-	info: PreviewParticipantInfo['info'] & {
-		userId?: string;
-		audio_enabled?: boolean;
-		video_enabled?: boolean;
-		is_guest?: boolean;
-	};
+export interface SttSegmentEvent {
+	roomId: string;
+	segment: TranscriptSegment;
 }
 
-export interface PresenceParticipantsResponse {
-	success: boolean;
-	participants?: PresenceParticipant[];
-	error?: string;
-}
-
-export interface PresenceJoinResponse {
-	success: boolean;
-	error?: string;
+export interface SttToggleRequest {
+	enabled: boolean;
 }

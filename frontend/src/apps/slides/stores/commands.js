@@ -130,8 +130,6 @@ const addSlideCommand = ({ slide, index, slideIndex }) => ({
 	fromSlideIndex: slideIndex,
 	debug: `Add slide ${slide.clientId} at index ${index}`,
 	execute(state) {
-		// a name carried over from another row would make the next save update it
-		slide.name = ''
 		addSlide(state, index, slide)
 	},
 	undo(state) {
@@ -141,15 +139,14 @@ const addSlideCommand = ({ slide, index, slideIndex }) => ({
 
 const removeSlideCommand = ({ slide, index, slideIndex }) => ({
 	key: 'removeSlide',
-	jumpToSlideIndex: index - 1,
+	// the jump runs before the removal, so the new last index is one short of the current count
+	jumpToSlideIndex: Math.min(index, slidesLength.value - 2),
 	fromSlideIndex: slideIndex,
 	debug: `Remove slide at index ${index}`,
 	execute(state) {
 		removeSlide(state, index, slide)
 	},
 	undo(state) {
-		// autosave may already have deleted the row, so the next save has to insert it
-		slide.name = ''
 		addSlide(state, index, slide)
 	},
 })
@@ -213,14 +210,6 @@ const batchCommand = ({
 	focusElementId: focusElementId,
 	skipJumpOnExecute,
 	debug: 'Batch edit',
-	// history pops a burst that folds back to where it started, so the batch
-	// reports the leading command's values as its own
-	get oldValue() {
-		return commands[0]?.oldValue
-	},
-	get newValue() {
-		return commands[0]?.newValue
-	},
 	coalesceWith(incoming) {
 		commands.forEach((c, i) => c.coalesceWith(incoming.commands[i]))
 	},

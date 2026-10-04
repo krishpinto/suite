@@ -32,31 +32,39 @@
     <!-- Bar 1 · Identity -->
     <div class="sn-topbar">
       <div class="sn-topbar-left">
-        <!-- Brand mark doubles as the "back to home" action. Clicking it runs
-             flushAndClose so any pending edits are saved before navigation. -->
-        <button class="sn-app-icon-btn" type="button" aria-label="Back to home" title="Back to home" @click="flushAndClose">
-          <svg class="sn-app-icon" width="28" height="28" viewBox="0 0 118 118" fill="none" aria-hidden="true">
-            <path d="M93.9278 0H23.1013C10.3428 0 0 10.3428 0 23.1013V93.9278C0 106.686 10.3428 117.029 23.1013 117.029H93.9278C106.686 117.029 117.029 106.686 117.029 93.9278V23.1013C117.029 10.3428 106.686 0 93.9278 0Z" fill="#278F5E"/>
-            <path d="M77.757 25.9364H23.5215V36.437H77.757C80.6447 36.437 83.0073 38.7996 83.0073 41.6873V75.3942C83.0073 78.2818 80.6447 80.6445 77.757 80.6445H39.2724C36.3847 80.6445 34.0221 78.2818 34.0221 75.3942V50.6653H23.5215V75.3942C23.5215 84.0572 30.6094 91.1451 39.2724 91.1451H77.757C86.42 91.1451 93.5079 84.0572 93.5079 75.3942V41.6873C93.5079 33.0243 86.42 25.9364 77.757 25.9364Z" fill="white"/>
-            <path d="M53.8678 59.6958H43.3672V70.0914H53.8678V59.6958Z" fill="white"/>
-            <path d="M73.6617 50.6653H63.1611V70.1439H73.6617V50.6653Z" fill="white"/>
-          </svg>
-        </button>
-        <!-- Auto-sizing title. A hidden ::after pseudo mirrors the text and
-             sizes the box via real DOM text layout, so the input grows
-             pixel-perfect and smooth per keystroke, with no JS canvas measuring
-             and no width animation lagging behind the caret. -->
-        <span class="sn-title-fit" :data-value="currentTitle || 'Untitled Sheet'">
-          <input
-            name="sheet-title"
-            class="sn-title-input"
-            v-model="currentTitle"
-            placeholder="Untitled Sheet"
-            spellcheck="false"
-            @focus="onTitleFocus"
-            @blur="onTitleBlur"
-          />
-        </span>
+        <div class="sn-identity">
+          <Dropdown :options="brandMenuOptions" :offset="16">
+            <template #default="{ open }">
+			  <Tooltip text="Open Sheets menu">
+              <div class="sn-app-menu-trigger" aria-label="Open Sheets menu">
+                <svg class="sn-app-icon" width="28" height="28" viewBox="0 0 118 118" fill="none" aria-hidden="true">
+                  <path d="M93.9278 0H23.1013C10.3428 0 0 10.3428 0 23.1013V93.9278C0 106.686 10.3428 117.029 23.1013 117.029H93.9278C106.686 117.029 117.029 106.686 117.029 93.9278V23.1013C117.029 10.3428 106.686 0 93.9278 0Z" fill="#278F5E"/>
+                  <path d="M77.757 25.9364H23.5215V36.437H77.757C80.6447 36.437 83.0073 38.7996 83.0073 41.6873V75.3942C83.0073 78.2818 80.6447 80.6445 77.757 80.6445H39.2724C36.3847 80.6445 34.0221 78.2818 34.0221 75.3942V50.6653H23.5215V75.3942C23.5215 84.0572 30.6094 91.1451 39.2724 91.1451H77.757C86.42 91.1451 93.5079 84.0572 93.5079 75.3942V41.6873C93.5079 33.0243 86.42 25.9364 77.757 25.9364Z" fill="white"/>
+                  <path d="M53.8678 59.6958H43.3672V70.0914H53.8678V59.6958Z" fill="white"/>
+                  <path d="M73.6617 50.6653H63.1611V70.1439H73.6617V50.6653Z" fill="white"/>
+                </svg>
+                <FeatherIcon :name="open ? 'chevron-up' : 'chevron-down'" class="size-4 text-ink-gray-7" />
+              </div>
+			  </Tooltip>
+            </template>
+          </Dropdown>
+          <Breadcrumbs v-if="!isTitleEditing" :items="sheetBreadcrumbs" />
+          <template v-else>
+            <div class="flex min-w-0 items-center">
+              <Breadcrumbs class="sn-parent-breadcrumb" :items="sheetHomeBreadcrumbs" />
+              <span class="mx-0.5 text-base text-ink-gray-4" aria-hidden="true">/</span>
+              <InlineRenameInput
+                v-model="currentTitle"
+                :editing="isTitleEditing"
+                appearance="breadcrumb"
+                class="max-w-[520px]"
+                @submit="finishTitleEditing"
+                @cancel="cancelTitleEditing"
+                @blur="finishTitleEditing"
+              />
+            </div>
+          </template>
+        </div>
         <!-- Save status — muted inline text; never competes with the title -->
         <span v-if="isSaving" class="sn-save-status">
           <FeatherIcon name="loader" class="sn-save-icon sn-save-spin" />
@@ -307,7 +315,9 @@
 
     <!-- Bar 3 · Formula bar -->
     <div class="sn-formula-bar">
-      <span class="sn-cell-ref" :title="`Active cell ${activeCell}`">{{ activeCell }}</span>
+      <Tooltip :text="`Active cell ${activeCell}`">
+        <span class="sn-cell-ref">{{ activeCell }}</span>
+      </Tooltip>
       <span class="sn-fx-label" aria-hidden="true">fx</span>
       <div class="sn-formula-wrap">
         <input
@@ -882,20 +892,6 @@
       @navigate-to="onNavigateTo"
     />
 
-    <!-- Cmd+K command palette -->
-    <CommandPalette v-model:open="showCmdPalette" v-model:query="cmdQuery" @select="onCmdSelect">
-      <CommandPaletteInput placeholder="Search commands" />
-      <CommandPaletteList>
-        <CommandPaletteGroup v-for="group in cmdGroups" :key="group.title" :label="group.title">
-          <CommandPaletteItem v-for="item in group.items" :key="item.name" :value="item">
-            {{ item.title }}
-            <template v-if="item.description" #suffix>{{ item.description }}</template>
-          </CommandPaletteItem>
-        </CommandPaletteGroup>
-      </CommandPaletteList>
-      <CommandPaletteEmpty />
-    </CommandPalette>
-
     <!-- Hyperlink dialog (Ctrl+L) — stores fmt.hyperlink on the active cell -->
     <Dialog v-model:open="showHyperlinkDialog" title="Insert hyperlink" size="sm">
       <template #default>
@@ -1259,12 +1255,20 @@
 </template>
 
 <script setup>
-import { h, ref, reactive, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
+import { h, ref, reactive, computed, customRef, watch, nextTick, onMounted, onBeforeUnmount, onScopeDispose } from 'vue'
+import { useMediaQuery } from '@vueuse/core'
 import { createGrid }          from '../../canvas/index.js'
 import { COL_HEADER_H, ROW_HEADER_W } from '../../canvas/constants.js'
 import { colLabel, parseCellId, cellId } from '../../utils/cells.js'
 import { call } from '../../utils/api.js'
-import { useCurrentUser } from '@/boot/session'
+import { useCurrentUser, useSessionStore } from '@/boot/session'
+import { useAppSwitcher } from '@/composables/useAppSwitcher'
+import { useThemeMenuOption } from '@/composables/useThemeMenuOption'
+import { useRootStore } from '@/stores/root'
+import { confirmLeave } from '@/utils/confirmLeave'
+import { onBeforeRouteLeave, onBeforeRouteUpdate } from 'vue-router'
+import { useSettingsMenuOption } from '@/composables/useSettingsMenuOption'
+import { appPageMeta } from '@/utils/documentTitle'
 import { userInitials } from '../../utils/session.js'
 import { parseNumberFmt, buildNumberFmt, applyNumberFmt } from '../../utils/format-number.js'
 import { getTextWrap } from '../../utils/text-wrap.js'
@@ -1303,7 +1307,6 @@ import { useCollaboration }    from './useCollaboration.js'
 import { useExportImport }     from './useExportImport.js'
 import { useVersionHistory }   from './useVersionHistory.js'
 import { useSplitText }        from './useSplitText.js'
-import { buildCommandGroups }  from './commandPalette.config.js'
 import FindReplace             from './FindReplace.vue'
 import VersionHistory          from './VersionHistory.vue'
 import VersionPreviewBanner    from './VersionPreviewBanner.vue'
@@ -1320,25 +1323,51 @@ import { createChartEngine } from '../../engine/charts.js'
 import { useChartIntegration } from './useChartIntegration.js'
 import ChartDialog             from './ChartDialog.vue'
 import ChartOverlay            from './ChartOverlay.vue'
+import InlineRenameInput       from '@/apps/drive/components/InlineRenameInput.vue'
 import { createNamedRanges }   from '../../engine/named-ranges.js'
 import { getFunctionNames }    from '../../engine/formula.js'
 import NamedRangesDialog       from './NamedRangesDialog.vue'
 import { useSmartFill }        from './useSmartFill.js'
-import * as versionsApi        from '../../services/versions.js'
+import { cellHistory as fetchCellHistory } from '../../services/versions.js'
 import {
-   Avatar, Badge, Button, Checkbox, Dialog, Dropdown, FormControl, KeyboardShortcut, KeyboardShortcutsDialog, Spinner, TextInput, Tooltip } from 'frappe-ui'
+   Avatar, Badge, Breadcrumbs, Button, Checkbox, Dialog, Dropdown, FormControl, KeyboardShortcut, KeyboardShortcutsDialog, Spinner, TextInput, Tooltip, usePageMeta } from 'frappe-ui'
 import {
-  CommandPalette,
-  CommandPaletteEmpty,
-  CommandPaletteGroup,
-  CommandPaletteInput,
-  CommandPaletteItem,
-  CommandPaletteList,
   Icon as FeatherIcon,
 } from 'frappe-ui/experimental'
 
 const props = defineProps({ id: { type: String, default: 'new' } })
 const emit  = defineEmits(['close', 'saved'])
+const sessionStore = useSessionStore()
+const appsMenuOption = useAppSwitcher('sheets', async () => {
+  await flushSave()
+  return !saveError.value
+})
+const themeMenuOption = useThemeMenuOption()
+const settingsMenuOption = useSettingsMenuOption()
+const isTitleEditing = ref(false)
+const sheetHomeBreadcrumbs = computed(() => [
+  { label: 'Sheets', route: { name: 'sheets-home' } },
+])
+const sheetBreadcrumbs = computed(() => [
+  ...sheetHomeBreadcrumbs.value,
+  { label: currentTitle.value || 'Untitled Sheet', onClick: startTitleEditing },
+])
+const brandMenuOptions = computed(() => [
+  {
+    group: '',
+    options: [appsMenuOption.value],
+  },
+  {
+    group: '',
+    options: [
+      settingsMenuOption,
+      themeMenuOption,
+      ...(sessionStore.isLoggedIn
+        ? [{ label: 'Log out', icon: 'lucide-log-out', onClick: () => sessionStore.logout.submit() }]
+        : []),
+    ],
+  },
+])
 
 // ── Engine instances ──────────────────────────────────────────────────────────
 
@@ -1657,6 +1686,7 @@ const formulaValue      = ref('')
 const canUndo           = ref(false)
 const canRedo           = ref(false)
 const currentTitle      = ref('Untitled Sheet')
+usePageMeta(() => appPageMeta(currentTitle.value, 'Sheets'))
 const activeNumberFormat = ref('')
 
 // Cross-sheet picker: when the user starts a `=…` edit in the top formula
@@ -1691,7 +1721,22 @@ const hasActiveHyperlink   = computed(() => !!activeFormat.value?.hyperlink)
 const showFormulas      = ref(false)
 
 const selectionStats    = ref(null)
-const isDirty           = ref(false)
+let _dirtyRevision = 0
+const isDirty = customRef((track, trigger) => {
+  let value = false
+  return {
+    get() {
+      track()
+      return value
+    },
+    set(next) {
+      if (next) _dirtyRevision += 1
+      if (next === value) return
+      value = next
+      trigger()
+    },
+  }
+})
 const isPaintingFormat  = ref(false)
 
 // ── Comment UI state ──────────────────────────────────────────────────────────
@@ -2026,6 +2071,20 @@ const userInitial = computed(() => userInitials(userFullName.value, userEmail.va
 const shareOpen   = ref(false)
 const shareCount  = ref(0)   // explicit share count (excluding owner); updated by ShareDialog
 const aiSettingsOpen = ref(false)
+const unregisterPaletteGroups = useRootStore().registerPaletteGroups('sheets-editor-settings', () => {
+  if (!window.frappe?.boot?.ai_assist_can_configure) return []
+
+  return [{
+    commands: [{
+      id: 'sheets-settings',
+      label: 'AI settings',
+      icon: 'lucide-cpu',
+      keywords: ['AI', 'assist', 'configure'],
+      run: () => (aiSettingsOpen.value = true),
+    }],
+  }]
+})
+onScopeDispose(unregisterPaletteGroups)
 const { exportCSV, exportXLSX, exportPDF, importCSV, importXLSX } = useExportImport({
   getSheet:        () => sheet,
   getCurrentTitle: () => currentTitle.value,
@@ -2500,12 +2559,17 @@ const {
   getGrid: () => grid,
 })
 
-const moreToolbarOptions = buildMoreToolbarOptions({
+// Mirrors the `.sn-tool-extra` media query in this file's <style> block: below
+// this width the inline tool groups are hidden and the "…" menu carries them.
+const toolbarCollapsed = useMediaQuery('(max-width: 1280px)')
+
+const moreToolbarOptions = computed(() => buildMoreToolbarOptions({
   toggleFmt, toggleWrap, toggleFormatPainter, clearFormatting,
   adjustDecimals, openCfDialog, openHyperlinkDialog, toggleMerge,
   toggleSortFilter, applyBorder, zoomBy, resetZoom, openPivotDialog,
   openChartDialog, openNamedRangesDialog, runSmartFill,
-})
+  collapsed: toolbarCollapsed.value,
+}))
 
 // Collaboration — placed here because currentSheet comes from useSheetTabs above.
 const { presentUsers, remoteCursors, broadcastCellChange, broadcastBatchChange, broadcastCursor, drainLocalTouches } =
@@ -3351,7 +3415,6 @@ function _setupEventListeners() {
   // dragging the canvas off-position. Pin it back the instant that happens.
   gridWrapRef.value.addEventListener('scroll', _pinGridWrapScroll, { passive: true })
   window.addEventListener('keydown',      onGlobalKey)
-  window.addEventListener('beforeunload', onBeforeUnloadGuard)
   document.addEventListener('paste',     onDocPaste)
   document.addEventListener('copy',      onDocCopy)
   document.addEventListener('cut',       onDocCut)
@@ -3438,7 +3501,6 @@ onBeforeUnmount(() => {
   if (isDirty.value && !readOnly.value && props.id && props.id !== 'new') {
     saveExisting(props.id, currentTitle.value, { keepalive: true })
   }
-  window.removeEventListener('beforeunload', onBeforeUnloadGuard)
   gridWrapRef.value?.removeEventListener('scroll', _pinGridWrapScroll)
   ro?.disconnect()
   grid?.destroy()
@@ -3453,15 +3515,23 @@ onBeforeUnmount(() => {
 
 // ── Save ──────────────────────────────────────────────────────────────────────
 
-// Browser-level guard (tab close / refresh / cross-app nav). The native
-// "Leave site?" prompt is the only thing that can preempt a unload reliably.
-function onBeforeUnloadGuard(e) {
-  if (!isDirty.value) return
-  e.preventDefault()
-  e.returnValue = ''   // Chrome requires returnValue to show the prompt
+let _autoSaveTimer = null
+let _savePromise = null
+let _pendingSaveBatch = null
+
+function hasUnsavedChanges() {
+  return isDirty.value || isSaving.value
 }
 
-let _autoSaveTimer = null
+const confirmUnsavedNavigation = () => {
+  if (!hasUnsavedChanges() || readOnly.value) return true
+  return confirmLeave()
+}
+onBeforeRouteLeave(confirmUnsavedNavigation)
+onBeforeRouteUpdate((to, from) => {
+  if (to.params.id === from.params.id) return true
+  return confirmUnsavedNavigation()
+})
 
 // Operation queue — populated by _queueOp() at write sites (paste, fill,
 // import, cell edit, etc.).  Flushed after each successful save so each
@@ -3706,13 +3776,12 @@ function _diffRefs(before, after) {
 // the server returns an HTML 413 instead of JSON.
 const _MAX_OP_PAYLOAD_BYTES = 64 * 1024
 
-// Drains the queue and returns the ops as a single batch shaped for the
-// versioning save endpoint. We hand this directly to `saveExisting` so the
-// server allocates one contiguous block of op-log seqs in user-action order.
-function _drainOpsForSave() {
-	if (!_opQueue.length || props.id === 'new') return []
-	const batch = _opQueue.splice(0, _opQueue.length)
-	return batch.map(_serialiseOp)
+// Snapshot the queue without removing entries. They are removed only after the
+// save succeeds, so a failed save can retry without losing operation history.
+function _opsForSave() {
+	if (!_opQueue.length || props.id === 'new') return { ops: [], count: 0 }
+	const batch = _opQueue.slice()
+	return { ops: batch.map(_serialiseOp), count: batch.length }
 }
 
 function _serialiseOp(op) {
@@ -3743,6 +3812,7 @@ function _triggerAutoSave() {
 }
 
 async function _doAutoSave() {
+  if (_savePromise) await _savePromise
   if (!isDirty.value) return
   // Backstop: a viewer should never reach save_sheet (which would throw
   // PermissionError). The input layer already blocks their edits, so isDirty
@@ -3753,21 +3823,33 @@ async function _doAutoSave() {
   // bootstrap save failed for any reason, leave it to a subsequent reload
   // rather than spamming the server on every typed character.
   if (props.id === 'new') return
+  isDirty.value = false
   // Drain queued ops BEFORE the save so the batch lands atomically with the
   // implicit `save` op and keeps the canonical user-action ordering intact.
-  const ops = _drainOpsForSave()
-  await saveExisting(props.id, currentTitle.value, { ops })
-  if (!saveError.value) {
-    isDirty.value   = false
-    justSaved.value = true
-    setTimeout(() => { justSaved.value = false }, 2500)
+  const batch = _pendingSaveBatch || { ..._opsForSave(), revision: _dirtyRevision }
+  _pendingSaveBatch = batch
+  _savePromise = _pendingSaveBatch.failed
+    ? retrySave()
+    : saveExisting(props.id, currentTitle.value, { ops: batch.ops })
+  await _savePromise
+  _savePromise = null
+  if (saveError.value) {
+    batch.failed = true
+    isDirty.value = true
+    return
   }
+  _opQueue.splice(0, batch.count)
+  _pendingSaveBatch = null
+  isDirty.value = _dirtyRevision > batch.revision
+  justSaved.value = true
+  setTimeout(() => { justSaved.value = false }, 2500)
 }
 
 async function flushSave() {
-  if (!isDirty.value) return
   clearTimeout(_autoSaveTimer)
-  await _doAutoSave()
+  do {
+    await _doAutoSave()
+  } while (isDirty.value && !saveError.value)
 }
 
 // Manual retry handler — bound to the refresh button next to the
@@ -3801,11 +3883,6 @@ watch(saveError, (msg) => {
   }, 30_000)
 })
 
-async function flushAndClose() {
-  await flushSave()
-  emit('close')
-}
-
 // Watch for any dirty change → schedule auto-save
 watch(isDirty, (dirty) => { if (dirty) _triggerAutoSave() })
 
@@ -3815,18 +3892,24 @@ watch(showSortFilter, () => { grid?.render?.() })
 
 // Title focus/blur — mark `isDirty` when the value changed during the focus
 // session so `_doAutoSave` doesn't bail on its `!isDirty` guard. Without
-// this, a rename-then-leave flow (no cell edit in between) silently dropped
-// the new title: the 2 s autosave ran but exited early, and `flushAndClose`
-// → `flushSave` did the same. Snapshotting on focus avoids spurious saves
+// this, a rename-then-save flow (no cell edit in between) silently dropped
+// the new title because `flushSave` exited early. Snapshotting on focus avoids spurious saves
 // when the user just clicks into and out of the field without typing.
 let _titleAtFocus = ''
-function onTitleFocus() { _titleAtFocus = currentTitle.value }
-function onTitleBlur() {
+function startTitleEditing() {
+  _titleAtFocus = currentTitle.value
+  isTitleEditing.value = true
+}
+function finishTitleEditing() {
+  if (!isTitleEditing.value) return
   if (currentTitle.value !== _titleAtFocus) isDirty.value = true
+  isTitleEditing.value = false
   _triggerAutoSave()
 }
-
-watch(isSaving, (cur, prev) => { if (prev && !cur && !saveError.value) isDirty.value = false })
+function cancelTitleEditing() {
+  currentTitle.value = _titleAtFocus
+  isTitleEditing.value = false
+}
 
 function onSave() { _doAutoSave() }
 
@@ -4812,7 +4895,7 @@ async function openCellHistory() {
   cellHistory.error   = ''
   cellHistory.entries = []
   try {
-    cellHistory.entries = await versionsApi.cellHistory(
+    cellHistory.entries = await fetchCellHistory(
       props.id, id, sheet.getCurrentSheet(),
     )
   } catch (err) {
@@ -5799,27 +5882,6 @@ function doUnhideAllCols() {
 }
 
 
-// ── Cmd+K command palette ─────────────────────────────────────────────────────
-// CommandPalette ships its own Cmd+K listener that flips `showCmdPalette`.
-const showCmdPalette = ref(false)
-const cmdQuery       = ref('')
-
-const cmdGroups = computed(() => buildCommandGroups({
-  toggleFmt, setAlign, setValign, adjustDecimals, toggleWrap, clearFormatting,
-  undo, redo, repeatLast, showFindReplace, openFindReplace, showFormulas, repopulateGrid: _repopulateGrid, showShortcutsHelp,
-  contextMenu, getGrid: () => grid,
-  doInsertRow, doDeleteRow, doInsertCol, doDeleteCol,
-  doMoveColLeft, doMoveColRight,
-  doHideRows, doHideCols, doUnhideAllRows, doUnhideAllCols,
-  doAutoFitCol, doAutoFitRow, toggleMerge, addRowsCount, doAddMoreRows,
-  doFreezeRow, doFreezeCol, doUnfreezeRows, doUnfreezeCols, showSortFilter,
-  openPivotDialog,
-  addSheet, currentSheet, openRenameDialog, doDuplicateSheet, doDeleteSheet,
-  onSave, exportCSV, exportXLSX, exportPDF, csvInputRef, xlsxInputRef,
-}))
-
-function onCmdSelect(item) { item?.fn?.() }
-
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 // Returns { before, after, refs } for cells whose value actually changed.
@@ -6015,46 +6077,23 @@ function toggleShowFormulas() {
 .sn-load-error-sub   { font-size: 13px; color: var(--ink-gray-6); margin: 0 0 8px; max-width: 360px; }
 
 /* ── Bar 1 · Identity / topbar ───────────────────────────────────────────── */
-.sn-topbar       { display:flex; align-items:center; justify-content:space-between; height:48px; padding:0 16px; border-bottom:1px solid var(--outline-gray-2); background:var(--surface-base); flex-shrink:0; }
+.sn-topbar       { position:relative; z-index:10; display:flex; align-items:center; justify-content:space-between; height:48px; padding:0 12px; border-bottom:1px solid var(--outline-elevation-1); background:var(--surface-elevation-1); flex-shrink:0; }
 /* Left cluster groups: brand+title tight (gap:4); status chips sit further away
    (gap:12) so the title reads as the focal point, not crowded by badges. */
 .sn-topbar-left  { display:flex; align-items:center; gap:8px; min-width:0; }
-.sn-topbar-left  > .sn-app-icon-btn + .sn-title-fit { margin-left:-8px; }
 .sn-topbar-right { display:flex; align-items:center; gap:6px; flex-shrink:0; }
+.sn-identity { display:flex; min-width:0; align-items:center; gap:8px; }
 
 .sn-app-icon { width:28px; height:28px; flex-shrink:0; display:block; }
-.sn-app-icon-btn {
-  display:inline-flex; align-items:center; justify-content:center;
-  width:36px; height:36px; padding:4px; margin:0; border:none; background:transparent; cursor:pointer;
-  border-radius:8px; transition:background-color .12s;
-}
-.sn-app-icon-btn:hover  { background:var(--surface-gray-2); }
-.sn-app-icon-btn:focus-visible { outline:2px solid var(--outline-gray-4); outline-offset:2px; }
+.sn-app-menu-trigger { display:flex; width:fit-content; align-items:center; gap:8px; cursor:pointer; }
+.sn-parent-breadcrumb :deep(a) { color:var(--ink-gray-5); }
 
-/* Auto-sizing title. A hidden ::after mirror carries the exact same typography
-   and box as the input; being normal flow, ITS width sizes the wrapper to the
-   real rendered text. The input is positioned absolutely on top so its own
+/*
    intrinsic ~20ch width is taken out of the layout — otherwise it, not the
    text, would dictate the box. Result: the box hugs the text and grows smoothly
    per keystroke, with no width animation lagging the caret and no canvas
    measurement drifting from actual metrics. min/max-width keep the old
    click-target floor and runaway-title ceiling. */
-.sn-title-fit { position:relative; display:inline-block; min-width:56px; max-width:520px; }
-.sn-title-fit::after {
-  content:attr(data-value) ' ';
-  display:block;
-  visibility:hidden;
-  white-space:pre;
-  box-sizing:border-box;
-  height:32px; border:1px solid transparent; padding:0 10px;
-  max-width:520px; overflow:hidden;
-  font-size:15px; font-weight:600; font-family:inherit; letter-spacing:-.005em;
-}
-.sn-title-input { position:absolute; inset:0; box-sizing:border-box; width:100%; height:100%; border:1px solid transparent; border-radius:6px; padding:0 10px; font-size:15px; font-weight:600; color:var(--ink-gray-9); background:transparent; outline:none; font-family:inherit; letter-spacing:-.005em; transition:background-color .12s, border-color .12s; }
-
-.sn-title-input:hover { background:var(--surface-gray-2); }
-.sn-title-input:focus { border-color:var(--outline-gray-4); background:var(--surface-base); box-shadow:0 0 0 2px rgba(23,23,23,.10); }
-
 /* Hairline between action buttons and avatar — groups the cluster without
    relying on extra padding. */
 .sn-topbar-divider { width:1px; height:20px; background:var(--outline-gray-2); margin:0 4px; flex-shrink:0; }
@@ -6213,15 +6252,20 @@ function toggleShowFormulas() {
   background: #D8F1F6 !important;
 }
 
-/* Toolbar overflow — `.sn-tool-extra` groups stay inline at wide widths;
+/* Toolbar overflow — `.sn-tool-extra` groups stay inline at wide widths and
    collapse below 1280px into the `.sn-tool-more` "…" dropdown. Using
    `display:contents` on the wrappers means the buttons participate in the
-   parent flex layout when shown, with zero visual nesting. */
+   parent flex layout when shown, with zero visual nesting.
+
+   The "…" button itself is shown at every width: it is the only mouse path to
+   the actions that have no toolbar button of their own (pivot table, named
+   ranges, zoom, Smart Fill). `buildMoreToolbarOptions` drops the options that
+   are already inline, so the menu never repeats a visible button — keep its
+   `collapsed` argument in sync with the breakpoint below. */
 .sn-tool-extra { display: contents; }
-.sn-tool-more  { display: none; margin-left: auto; }
+.sn-tool-more  { display: inline-flex; margin-left: auto; }
 @media (max-width: 1280px) {
   .sn-tool-extra { display: none; }
-  .sn-tool-more  { display: inline-flex; }
 }
 
 /* Color-picker trigger buttons (FeatherIcon glyph above a colored underline).

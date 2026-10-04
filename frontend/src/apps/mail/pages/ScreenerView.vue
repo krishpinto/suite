@@ -271,6 +271,7 @@
 						hidden: !isMobile && !showReadingPane && !openSender,
 					}"
 					@touchstart.passive="onPreviewTouchStart"
+					@touchmove.passive="onPreviewTouchMove"
 					@touchend.passive="onPreviewTouchEnd"
 				>
 					<template v-if="openSender">
@@ -422,6 +423,7 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { appPageMeta } from '@/utils/documentTitle'
 import { useRouter } from 'vue-router'
 import {
 	Archive,
@@ -450,7 +452,11 @@ import {
 } from 'frappe-ui'
 
 import { raiseToast, shouldIgnoreKeypress } from '@/apps/mail/utils'
-import { isNavigationKey, navigationOffset } from '@/apps/mail/utils/listNavigation'
+import {
+	isNavigationKey,
+	navigationOffset,
+	neighbourAfterRemoval,
+} from '@/apps/mail/utils/listNavigation'
 import {
 	useListReload,
 	useReadingPane,
@@ -461,7 +467,7 @@ import {
 } from '@/apps/mail/utils/composables'
 import { SPLIT_LIST_CLASS, SPLIT_PANE_CLASS } from '@/apps/mail/constants'
 import { userStore } from '@/apps/mail/stores/user'
-import AdaptiveDropdown from '@/apps/mail/components/AdaptiveDropdown.vue'
+import AdaptiveDropdown from '@/components/AdaptiveDropdown.vue'
 import HeaderActions from '@/apps/mail/components/HeaderActions.vue'
 import NoMails from '@/apps/mail/components/Icons/NoMails.vue'
 import MailDate from '@/apps/mail/components/MailDate.vue'
@@ -638,7 +644,11 @@ watch(
 
 // Swipe on the open preview (mobile): left → next sender, right → previous — the
 // screener counterpart of the mailbox thread swipe.
-const { onTouchStart: onPreviewTouchStart, onTouchEnd: onPreviewTouchEnd } = useSwipeNav(
+const {
+	onTouchStart: onPreviewTouchStart,
+	onTouchMove: onPreviewTouchMove,
+	onTouchEnd: onPreviewTouchEnd,
+} = useSwipeNav(
 	() => isMobile.value && !!openSender.value,
 	(offset) => {
 		const list = senders.data ?? []
@@ -755,10 +765,11 @@ usePageMeta(() => {
 	// Name the open sender, the way the mailbox view names the open thread. The queue's own title is
 	// the right one for the list, but it made every sender's page — each its own URL, each shareable
 	// and restorable — read as the same tab, and the count kept moving under it as you triaged.
-	if (openSender.value) return { title: openSender.value.from_name || openSender.value.from_email }
+	if (openSender.value)
+		return appPageMeta(openSender.value.from_name || openSender.value.from_email, 'Mail')
 
 	const n = senders.data?.length ?? 0
-	return { title: n ? `(${n}) ${__('Screener')}` : __('Screener') }
+	return appPageMeta(n ? `(${n}) ${__('Screener')}` : __('Screener'), 'Mail')
 })
 
 const waitingLabel = computed(() => {
@@ -907,8 +918,10 @@ const runAction = (
 ) => {
 	if (!fromEmails.length) return
 
-	// When acting on the sender open in the detail view, line up the next one down so you can triage
-	// straight through — resolved before the optimistic removal.
+	// When acting on the sender open in the detail view, line up the next one so you can triage
+	// straight through — the one below, or the one above at the end of the queue, since a pass that
+	// starts at the oldest sender spends all of itself there (see neighbourAfterRemoval). Resolved
+	// before the optimistic removal.
 	const list = senders.data ?? []
 	const actingOnOpen = !!openSender.value && matchSender(openSender.value)
 	let nextSender: ScreeningSender | undefined
@@ -916,7 +929,11 @@ const runAction = (
 		const idx = list.findIndex(
 			(s: ScreeningSender) => s.from_email === openSender.value!.from_email,
 		)
-		nextSender = list.slice(idx + 1).find((s: ScreeningSender) => !matchSender(s))
+		nextSender = neighbourAfterRemoval(
+			list as ScreeningSender[],
+			idx,
+			(s: ScreeningSender) => !matchSender(s),
+		)
 	}
 
 	// Optimistically drop the acted senders so the rows leave immediately and every other row stays

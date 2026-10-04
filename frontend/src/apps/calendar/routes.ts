@@ -1,11 +1,5 @@
 import type { RouteRecordRaw } from 'vue-router'
 
-import { createResource } from 'frappe-ui'
-
-// Install the calendar-local navigation guard (account resolution + shortcut
-// expansion) on the shared suite router. Importing for side effects only.
-import '@/apps/calendar/router'
-
 /**
  * Calendar route module — mounted by the suite router under the '/calendar'
  * prefix. Paths are RELATIVE to '/calendar' (no leading slash; the empty-path
@@ -42,6 +36,26 @@ export const routes: RouteRecordRaw[] = [
 				name: 'calendar-day',
 				component: () => import('@/apps/calendar/pages/CalendarView.vue'),
 			},
+			{
+				path: 'account/:accountId/agenda/:year?/:month?/:day?',
+				name: 'calendar-agenda',
+				component: () => import('@/apps/calendar/pages/CalendarView.vue'),
+			},
+			// Phone-only destination: the tab bar's search tab. A page of its own rather
+			// than the palette raised over the calendar, so a result opens where it was
+			// found and Back returns to the search. On a desktop search is the palette.
+			{
+				path: 'account/:accountId/search',
+				name: 'calendar-search',
+				component: () => import('@/apps/calendar/pages/CalendarView.vue'),
+			},
+			// Phone-only destination: the tab bar's third tab. On a desktop the same
+			// settings are the SettingsDialog the sidebar opens.
+			{
+				path: 'account/:accountId/profile',
+				name: 'calendar-profile',
+				component: () => import('@/apps/calendar/pages/ProfileView.vue'),
+			},
 			// Shortcut routes: short paths that resolve to their full account-scoped
 			// equivalents once the active accountId is known (resolved in the guard).
 			{
@@ -74,25 +88,18 @@ export const routes: RouteRecordRaw[] = [
 				component: ShortcutRedirect,
 				meta: { shortcut: true },
 			},
+			{
+				path: 'agenda/:year?/:month?/:day?',
+				name: 'calendar-agenda-shortcut',
+				component: ShortcutRedirect,
+				meta: { shortcut: true },
+			},
+			{
+				path: 'search',
+				name: 'calendar-search-shortcut',
+				component: ShortcutRedirect,
+				meta: { shortcut: true },
+			},
 		],
 	},
 ]
-
-export default routes
-
-/* -------------------------------------------------------------------------- */
-/* Translations                                                                */
-/*                                                                             */
-/* The suite installs ONE global translation plugin (foundation                */
-/* src/boot/translation.ts) so bare `__('text')` works everywhere. We only     */
-/* need to populate `window.translatedMessages`. Port calendar's translations  */
-/* fetch as a side-effect on module load. Backend method path preserved as-is. */
-/* -------------------------------------------------------------------------- */
-
-const translations = createResource({
-	url: 'suite.mail.api.get_translations',
-	cache: 'translations',
-	transform: (data) => (window.translatedMessages = data),
-})
-
-if (!window.translatedMessages) translations.fetch()

@@ -144,6 +144,7 @@
 
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
+import { appPageMeta } from '@/utils/documentTitle'
 import { useRouter } from 'vue-router'
 import { ArrowUpRight } from 'lucide-vue-next'
 import { Breadcrumbs, Button, Dialog, Skeleton, createResource, usePageMeta } from 'frappe-ui'
@@ -218,7 +219,7 @@ const data = computed<SubmissionDetails | null>(() =>
 // and be replaced.
 const title = computed(() => (data.value ? subjectLabel(data.value) : ''))
 
-usePageMeta(() => ({ title: title.value || __('Outbox') }))
+usePageMeta(() => appPageMeta(title.value || __('Outbox'), 'Mail'))
 
 const summary = computed(() => (data.value ? statusSummary(data.value) : ''))
 const activity = computed(() => (data.value ? activityEntries(data.value) : []))
@@ -231,7 +232,6 @@ const actions = computed(() => {
 		reschedule: () => (showReschedule.value = true),
 		cancelDelivery: () => (showCancel.value = true),
 		sendAgain: () => (showRetry.value = true),
-		tryAgainNow: () => retryNow.submit(),
 		remove: () => dismissMail.submit(),
 	})
 })
@@ -338,16 +338,6 @@ const retryMail = createResource({
 	onError: onActionError,
 })
 
-const retryNow = createResource({
-	url: 'suite.mail.api.scheduled.retry_delivery_now',
-	makeParams: () => ({ account: accountId, id: submissionId }),
-	onSuccess: () => {
-		raiseToast(__('Delivery attempt scheduled.'))
-		submission.reload()
-	},
-	onError: onActionError,
-})
-
 const dismissMail = createResource({
 	url: 'suite.mail.api.scheduled.dismiss_failed_mail',
 	makeParams: () => ({ account: accountId, id: submissionId }),
@@ -395,7 +385,7 @@ const cancelOptions = computed(() => ({
 	message: data.value?.email_deleted
 		? __('Cancel the scheduled delivery?')
 		: __('Cancel the scheduled delivery and move the message back to Drafts?'),
-	icon: { name: 'lucide-alert-triangle', theme: 'amber' },
+	icon: 'lucide-alert-triangle', theme: 'amber',
 	actions: [
 		{
 			label: __('Confirm'),
