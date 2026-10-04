@@ -3247,7 +3247,6 @@ function _setupGridInstance() {
 
       const before = sheet.getCell(id, writeSheet)
       sheet.setCell(id, value, writeSheet)
-      _ironcalcMirrorInput(id, value, writeSheet)
       if (writeSheet !== sheet.getCurrentSheet()) {
         switchSheet(writeSheet, { preserveEdit: true })
       }
@@ -3315,7 +3314,7 @@ function _setupGridInstance() {
     getValidation: id => validation.get(id, sheet.getCurrentSheet()),
     getCondFormat: (id, val) => condFormat.getFormatOverride(
       id, val, sheet.getCurrentSheet(),
-      (cid) => sheet.getDisplayValue(cid, sheet.getCurrentSheet()),
+      (cid) => _displayValue(cid),
     ),
     // A SPARKLINE formula evaluates to a spec object; the painter draws it.
     // In show-formulas mode the cell shows its =SPARKLINE(...) text instead.
@@ -5948,16 +5947,26 @@ function _cellDisplay(id) {
   if (showFormulas.value) return String(sheet.getCell(id) ?? '')
   const sn  = sheet.getCurrentSheet()
   const fmt = formats.get(id, sn)
-  const dv  = _ironcalc ? _ironcalcDisplay(id, sn) : sheet.getDisplayValue(id)
+  const dv  = _displayValue(id, sn)
   return fmt.numberFormat ? applyNumberFmt(dv, fmt.numberFormat) : dv
+}
+
+// A cell's computed display string, from whichever engine is active: IronCalc
+// in the preview, else the old engine. Readers that run during a paint use
+// this, so values and conditional formats come from the same engine.
+function _displayValue(id, sn = sheet.getCurrentSheet()) {
+  return _ironcalc ? _ironcalcDisplay(id, sn) : sheet.getDisplayValue(id, sn)
 }
 
 // ── IronCalc preview (?engine=ironcalc) ──────────────────────────────────────
 // Runs the new core (core/: worker, client, display cache) beside the old
 // engine. The grid's lazy getDisplay reads values from IronCalc; the old
-// engine still owns saving, undo and every feature layer. Only single-cell
-// commits are mirrored, so paste, fill and row/column edits diverge until
-// editing moves to commands. Needs the lazy render path (the default).
+// engine still owns saving, undo and every feature layer. Cell writes are
+// mirrored by wrapping the old engine's setCell / batchSetCells, so every
+// write path (in-cell editor, formula bar, paste, fill, checkboxes) reaches
+// IronCalc. Structural edits (insert/delete/move rows and columns, sheet
+// add/rename/delete) are not mirrored and diverge until editing moves to
+// commands. Needs the lazy render path (the default).
 
 let _ironcalc = null // { client, provider } once started
 
@@ -5989,7 +5998,26 @@ async function _startIronCalc() {
 
   const provider = createCellProvider({ client, cache, requestRender: () => grid?.render?.() })
   _ironcalc = { client, provider }
+  _mirrorOldEngineWrites()
   grid?.render?.()
+}
+
+// The old engine's two write entry points. Internal calls inside sheet.js
+// bypass these wrappers, but every caller in this component goes through
+// the object.
+function _mirrorOldEngineWrites() {
+  const setCell = sheet.setCell
+  sheet.setCell = (id, value, sn = sheet.getCurrentSheet()) => {
+    setCell(id, value, sn)
+    _ironcalcMirrorInput(id, value, sn)
+  }
+  const batchSetCells = sheet.batchSetCells
+  sheet.batchSetCells = (map, sn = sheet.getCurrentSheet(), opts) => {
+    const diff = batchSetCells(map, sn, opts)
+    // `after` holds every cell the batch changed, '' for cleared ones.
+    for (const [id, value] of Object.entries(diff?.after ?? {})) _ironcalcMirrorInput(id, value, sn)
+    return diff
+  }
 }
 
 let _ironcalcSeq = 0
