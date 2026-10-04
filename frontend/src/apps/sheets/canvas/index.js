@@ -6,6 +6,7 @@ import { createRenderLoop } from './render-loop.js'
 import { createViewport, watchPixelRatio } from './viewport.js'
 import { createSelection, jumpEdge } from './selection.js'
 import { createHitTester } from './input/hit-test.js'
+import { createRangePicker, refForRange } from './input/range-picker.js'
 import { TOTAL_ROWS, TOTAL_COLS, DEFAULT_TOTAL_ROWS, DEFAULT_TOTAL_COLS, DEFAULT_ROW_H, ROW_HEADER_W, COL_HEADER_H, setTotalRows, setTotalCols } from './constants.js'
 import { cellId, colLabel, parseCellId } from '../utils/cells.js'
 import { AC_FUNS, AC_FUN_KEYS, parseAcToken, parseSignatureContext, describeSignature, shouldSuggestRange, detectAdjacentRange, isNumericText } from '../utils/formula-ac.js'
@@ -105,12 +106,28 @@ export function createGrid(canvas, { onSelect, onCommit, onInput, onCancel, getF
   const renderer = createRenderer(ctx, geo)
   const overlay  = createOverlay(canvas.parentElement)
   const scrollbars = createScrollbars(canvas.parentElement, { getModel: () => _scrollModel(), scrollTo })
+  // Formula reference picking (click/drag/arrow cells into a `=…` formula).
+  const pick = createRangePicker({
+    activeElement: () => document.activeElement,
+    editorElement: overlay.el,
+    editingCell: () => S.anchor,
+    crossSheetName: () => _crossSheetName(),
+    colLabel,
+    totalRows: () => TOTAL_ROWS,
+    totalCols: () => TOTAL_COLS,
+    skipHiddenRow: (r, dr) => _skipHiddenR(r, dr),
+    skipHiddenCol: (c, dc) => _skipHiddenC(c, dc),
+    resolveMaster: (r, c) => _resolveMaster(r, c),
+    jumpEdge: (r, c, dr, dc) => _jumpEdge(r, c, dr, dc),
+    scrollIntoView: (r, c) => _scrollIntoView(r, c),
+    render: () => render(),
+  })
   _acSetup()
 
   // ── Render ──────────────────────────────────────────────────────────────────
 
   const loop = createRenderLoop(() => {
-    renderer.render({ cssW: vp.cssW, cssH: vp.cssH, getValue, sel: S.anchor, selEnd: S.head, selMode: S.mode, editing, getFormat, freeze, getMergeInfo, isSlave, getComment, getValidation, getCondFormat, getSparkline, getRightInset, getDiffFor: _diffCells ? _getDiffFor : null, marchAnts, marchPhase, pickerRect, colDrag: (colDrag && colDrag.moved) ? colDrag : null, zoom: _zoom })
+    renderer.render({ cssW: vp.cssW, cssH: vp.cssH, getValue, sel: S.anchor, selEnd: S.head, selMode: S.mode, editing, getFormat, freeze, getMergeInfo, isSlave, getComment, getValidation, getCondFormat, getSparkline, getRightInset, getDiffFor: _diffCells ? _getDiffFor : null, marchAnts, marchPhase, pickerRect: pick.rect, colDrag: (colDrag && colDrag.moved) ? colDrag : null, zoom: _zoom })
     scrollbars.layout()
   })
   // Declarations, not consts: both are called from code above this point.
@@ -237,7 +254,7 @@ export function createGrid(canvas, { onSelect, onCommit, onInput, onCancel, getF
     S.moveTo(r, c)
     ensureVisible(S.anchor.r, S.anchor.c)
     // Any non-picker selection move dismisses a lingering picker highlight.
-    if (pickerRect) { pickerRect = null }
+    pick.dismissHighlight()
     render()
     onSelect?.(cellId(S.anchor.r, S.anchor.c))
   }
@@ -292,10 +309,7 @@ export function createGrid(canvas, { onSelect, onCommit, onInput, onCancel, getF
 
   // Drop a passive range-suggestion highlight (never touches a real pick).
   function _clearSuggestion() {
-    if (!_sugActive) return
-    _sugActive = false
-    pickerRect = null
-    render()
+    if (pick.dropSuggestion()) render()
   }
 
   // Build the { kind:'range', name, rect } suggestion for an empty SUM-style
@@ -304,7 +318,7 @@ export function createGrid(canvas, { onSelect, onCommit, onInput, onCancel, getF
     if (!shouldSuggestRange(value, cursor)) return null
     const rect = detectAdjacentRange(S.anchor.r, S.anchor.c, (r, c) => isNumericText(getValue(cellId(r, c))))
     if (!rect) return null
-    const name = _refForRange(rect.r0, rect.c0, rect.r1, rect.c1, _crossSheetName())
+    const name = refForRange(rect, _crossSheetName(), colLabel)
     return { kind: 'range', name, rect }
   }
 
@@ -321,7 +335,7 @@ export function createGrid(canvas, { onSelect, onCommit, onInput, onCancel, getF
       const sug = _suggestRangeItem(value, cursor)
       if (sug) {
         _acItems = [sug]; _acIdx = 0
-        pickerRect = sug.rect; _sugActive = true
+        pick.showSuggestion(sug.rect)
         _acRender(); render()
         return
       }
@@ -379,11 +393,11 @@ export function createGrid(canvas, { onSelect, onCommit, onInput, onCancel, getF
 
   function _acHide() {
     _acItems = []; _acIdx = 0
-    // A live range suggestion owns pickerRect — drop that highlight too, and
+    // A live range suggestion owns the picker highlight — drop it too, and
     // repaint so it actually leaves the canvas (the Escape path returns without
-    // its own render()). The range-accept path pre-clears _sugActive so its
-    // inserted ref stays lit.
-    if (_sugActive) { _sugActive = false; pickerRect = null; render() }
+    // its own render()). An accepted suggestion is no longer a suggestion, so
+    // its inserted ref stays lit.
+    if (pick.dropSuggestion()) render()
     if (_acEl) _acEl.style.display = 'none'
   }
 
@@ -421,15 +435,8 @@ export function createGrid(canvas, { onSelect, onCommit, onInput, onCancel, getF
       input.setSelectionRange(pos, pos)
       onInput?.(cellId(S.anchor.r, S.anchor.c), newVal)
       // Promote the accepted suggestion to a real pick so the highlight is
-      // owned exactly like a click-picked ref — cleared on commit/cancel, and
-      // extendable from its origin on the next click — instead of lingering as
-      // a stale, unowned suggestion. Set `pickMouseAnchor` (survives with no
-      // active drag) but NOT `picker`: `picker` marks an in-flight drag, and
-      // the mousemove handler would rewrite the ref on the next pointer move.
-      const rr = item.rect
-      pickerRect      = { r0: rr.r0, c0: rr.c0, r1: rr.r1, c1: rr.c1 }
-      pickMouseAnchor = { r: rr.r0, c: rr.c0 }
-      _sugActive      = false       // the ref is now committed text, not a suggestion
+      // owned exactly like a click-picked ref (range-picker.ts).
+      pick.acceptSuggestion(item.rect)
       _acHide()
       input.focus()
       render()
@@ -463,62 +470,6 @@ export function createGrid(canvas, { onSelect, onCommit, onInput, onCancel, getF
   // keys as cursor movement inside the input.
   let editMode = 'enter'
 
-  // Formula-reference picker. Active while *any* focused <input> contains a
-  // formula (`=…`) and the user clicks/drags cells. The click inserts the
-  // cell's ref into that input instead of moving selection. Drag extends to a
-  // range. Works for both the inline cell editor (overlay) and the top
-  // formula bar — anything that's a currently-focused <input> with =-prefixed
-  // text qualifies.
-  let picker     = null  // { anchorR, anchorC, target: HTMLInputElement }
-  // The visible amber dashed highlight. Tracks the last picked cell/range and
-  // stays visible until the edit commits or is cancelled.
-  let pickerRect = null  // { r0, c0, r1, c1 }
-  // Keyboard-driven picker state ("PICKING" in the state-machine doc). Set by
-  // arrow keys while editing a formula at a ref-acceptable caret position.
-  // Going to null returns us to EDITING (text caret moves). See _pickerKb*.
-  let pickerKb   = null  // { target, anchorR, anchorC, headR, headC, insertStart, insertEnd, savedValue, savedCaret }
-  // Anchor for click-to-extend range picking. Survives mouseup (unlike
-  // `picker`) so the next click extends the ref from the first-clicked cell.
-  let pickMouseAnchor = null  // { r, c }
-  // True while `pickerRect` is a passive range *suggestion* (not a real pick),
-  // so we know it's safe to clear when the suggestion goes away.
-  let _sugActive = false
-
-  function _pickTarget() {
-    const ae = document.activeElement
-    if (!ae || ae.tagName !== 'INPUT') return null
-    if (typeof ae.value !== 'string' || !ae.value.startsWith('=')) return null
-    return ae
-  }
-
-  function _isPickMode() { return !!_pickTarget() }
-
-  // Returns the index right before any partial ref characters that abut the
-  // cursor — e.g. cursor after `=SUM(A1:B` → start of `A1:B`. Also consumes
-  // an immediately-preceding sheet prefix (`Sheet1!` or `'Sheet 1'!`) so a
-  // second cross-sheet pick replaces the *whole* prior ref instead of just
-  // its cell-ref tail (which produced `Sheet1!Sheet1!B2:E21`).
-  function _refReplaceStart(input) {
-    const pos = input.selectionStart
-    const val = input.value
-    const m = val.slice(0, pos).match(/(?:'(?:[^']|'')*'!|[A-Za-z_][A-Za-z0-9_]*!)?[A-Z]+\d*(?::[A-Z]*\d*)?$/i)
-    return m ? pos - m[0].length : pos
-  }
-
-  function _refForRange(r0, c0, r1, c1, sheetName) {
-    const a = colLabel(c0) + (r0 + 1)
-    const range = (r0 === r1 && c0 === c1) ? a : a + ':' + colLabel(c1) + (r1 + 1)
-    // Sheet prefix only when the pick is on a different sheet than the one
-    // the formula was started on. Quote any name that isn't a clean bare
-    // identifier (letters/digits/underscore, not starting with a digit) —
-    // dots, dashes, spaces, apostrophes all need wrapping per Excel rules.
-    // The engine tokenizer accepts both bare and quoted forms.
-    if (!sheetName) return range
-    const bareOk = /^[A-Za-z_][A-Za-z0-9_]*$/.test(sheetName)
-    if (bareOk) return `${sheetName}!${range}`
-    const escaped = sheetName.replace(/'/g, "''")
-    return `'${escaped}'!${range}`
-  }
   // Cross-sheet picker support. When the user is editing a formula on one
   // sheet (the "editing home") but currently viewing another sheet, every
   // ref written by the picker needs to carry that other sheet's name as a
@@ -528,70 +479,6 @@ export function createGrid(canvas, { onSelect, onCommit, onInput, onCancel, getF
     const cur  = getCurrentSheet?.()
     const home = getEditingHomeSheet?.()
     return home && cur && cur !== home ? cur : null
-  }
-  // Sheet prefix in the exact form the engine tokenizer parses — bare for
-  // clean identifiers, apostrophe-wrapped for everything else (matching
-  // _refForRange's own rule below).
-  function _sheetPrefixIfForeign() {
-    const sn = _crossSheetName()
-    if (!sn) return ''
-    const bareOk = /^[A-Za-z_][A-Za-z0-9_]*$/.test(sn)
-    return bareOk ? `${sn}!` : `'${sn.replace(/'/g, "''")}'!`
-  }
-
-  function _clearPickerHighlight() {
-    if (!pickerRect && !picker && !pickerKb) return
-    picker = null
-    pickerKb = null
-    pickerRect = null
-    pickMouseAnchor = null
-    _sugActive = false
-    render()
-  }
-
-  function _writeRef(input, refText, replaceStart) {
-    const val = input.value
-    const cursor = input.selectionStart
-    const next = val.slice(0, replaceStart) + refText + val.slice(cursor)
-    input.value = next
-    const newPos = replaceStart + refText.length
-    input.setSelectionRange(newPos, newPos)
-    // Notify any framework binding (Vue v-model / @input listeners on the
-    // top formula bar) plus our overlay's existing input handler.
-    input.dispatchEvent(new Event('input', { bubbles: true }))
-  }
-
-  // ── Formula picker — keyboard state machine ─────────────────────────────────
-  //
-  // While editing a `=…` formula, arrow keys at a *reference-acceptable* caret
-  // position drive a phantom picker cursor on the grid (match Google Sheets):
-  //   IDLE → showEditor → EDITING
-  //   EDITING → (arrow at ref pos) → PICKING → (arrow) updates ref live
-  //   EDITING → (arrow mid-token)  → native caret move (no picker)
-  //   PICKING → (type non-arrow)   → EDITING, inserted ref stays
-  //   PICKING → (Esc)              → EDITING, inserted ref removed
-  //   PICKING → (Enter/Tab)        → IDLE,    formula committed
-  //
-  // The text caret BEFORE the picker started is preserved so Esc can revert.
-
-  const REF_PRECEDERS = '=(,;+-*/:&^<>%'
-
-  function _isRefPosition(input) {
-    const pos = input.selectionStart
-    if (pos == null) return false
-    const left = input.value.slice(0, pos)
-    if (!left.startsWith('=')) return false
-    const trimmed = left.replace(/\s+$/, '')
-    if (trimmed === '=') return true
-    const last = trimmed[trimmed.length - 1]
-    if (REF_PRECEDERS.includes(last)) return true
-    // Trailing chars form a partial cell ref AND are preceded by a ref-preceder.
-    const m = trimmed.match(/([A-Z]+\d*(?::[A-Z]*\d*)?)$/i)
-    if (!m) return false
-    const before = trimmed.slice(0, trimmed.length - m[0].length).replace(/\s+$/, '')
-    if (!before) return true                                  // just '=A1'
-    const prev = before[before.length - 1]
-    return REF_PRECEDERS.includes(prev)
   }
 
   // Resolve a click/keystroke landing on a slave cell to its merge master.
@@ -620,115 +507,6 @@ export function createGrid(canvas, { onSelect, onCommit, onInput, onCancel, getF
     // Picking scrolls the view while the editor stays anchored to the formula
     // cell; repin it so it tracks that cell instead of hanging in place.
     _positionEditor()
-  }
-
-  // Compute the ref text from anchor+head and rewrite the inserted span.
-  function _pickerKbRender() {
-    if (!pickerKb) return
-    const { target, anchorR, anchorC, headR, headC, insertStart } = pickerKb
-    const r0 = Math.min(anchorR, headR), r1 = Math.max(anchorR, headR)
-    const c0 = Math.min(anchorC, headC), c1 = Math.max(anchorC, headC)
-    const ref = _refForRange(r0, c0, r1, c1, _crossSheetName())
-    // Replace the previously-inserted span (anchored by insertStart).
-    const val = target.value
-    const next = val.slice(0, insertStart) + ref + val.slice(pickerKb.insertEnd)
-    target.value = next
-    pickerKb.insertEnd = insertStart + ref.length
-    target.setSelectionRange(pickerKb.insertEnd, pickerKb.insertEnd)
-    target.dispatchEvent(new Event('input', { bubbles: true }))
-    pickerRect = { r0, c0, r1, c1 }
-    _scrollIntoView(headR, headC)
-    render()
-  }
-
-  // Enter PICKING from EDITING. Anchor starts at the cell directly adjacent
-  // to the edited cell, in the direction of the arrow keypress.
-  function _pickerKbStart(target, dr, dc, shiftKey) {
-    const savedCaret = target.selectionStart
-    const savedValue = target.value
-
-    let anchorR, anchorC, headR, headC, insertStart, insertEnd
-
-    // Mouse → keyboard handoff: a prior click/drag set `picker` and the ref
-    // was inserted at the input's current cursor. Adopt that anchor + rect
-    // so Shift+arrow extends from where the user dragged, not from `S.anchor`.
-    if (picker && picker.target === target && pickerRect) {
-      const refLen = _refForRange(pickerRect.r0, pickerRect.c0, pickerRect.r1, pickerRect.c1, _crossSheetName()).length
-      insertEnd   = target.selectionStart
-      insertStart = Math.max(0, insertEnd - refLen)
-
-      anchorR = picker.anchorR
-      anchorC = picker.anchorC
-      // Current "head" = the rect corner opposite the anchor.
-      const curHeadR = (anchorR === pickerRect.r0) ? pickerRect.r1 : pickerRect.r0
-      const curHeadC = (anchorC === pickerRect.c0) ? pickerRect.c1 : pickerRect.c0
-      headR = curHeadR + dr
-      headC = curHeadC + dc
-    } else {
-      insertStart = _refReplaceStart(target)
-      insertEnd   = target.selectionStart
-      // Fresh pick — start one step from the edited cell.
-      headR = S.anchor.r + dr
-      headC = S.anchor.c + dc
-      anchorR = headR; anchorC = headC
-    }
-
-    // Clamp, skip hidden, resolve merge masters.
-    headR = Math.max(0, Math.min(TOTAL_ROWS - 1, headR))
-    headC = Math.max(0, Math.min(TOTAL_COLS - 1, headC))
-    if (dr !== 0) headR = _skipHiddenR(headR, dr)
-    if (dc !== 0) headC = _skipHiddenC(headC, dc)
-    const m = _resolveMaster(headR, headC)
-    headR = m.r; headC = m.c
-    // Plain arrow collapses the range; Shift+arrow extends.
-    if (!shiftKey) { anchorR = headR; anchorC = headC }
-
-    pickerKb = {
-      target, anchorR, anchorC, headR, headC,
-      insertStart, insertEnd, savedValue, savedCaret,
-    }
-    _pickerKbRender()
-  }
-
-  // Move/extend the picker head. shift=true keeps anchor, false collapses.
-  // mod=true → jump to data-region edge using existing _jumpEdge.
-  function _pickerKbMove(dr, dc, shift, mod) {
-    if (!pickerKb) return
-    let nr = pickerKb.headR + dr, nc = pickerKb.headC + dc
-    if (mod) {
-      const t = _jumpEdge(pickerKb.headR, pickerKb.headC, dr, dc)
-      nr = t.r; nc = t.c
-    } else {
-      // Skip hidden rows/cols
-      if (dr !== 0) nr = _skipHiddenR(nr, dr)
-      if (dc !== 0) nc = _skipHiddenC(nc, dc)
-      nr = Math.max(0, Math.min(TOTAL_ROWS - 1, nr))
-      nc = Math.max(0, Math.min(TOTAL_COLS - 1, nc))
-    }
-    const master = _resolveMaster(nr, nc)
-    nr = master.r; nc = master.c
-    if (!shift) { pickerKb.anchorR = nr; pickerKb.anchorC = nc }
-    pickerKb.headR = nr; pickerKb.headC = nc
-    _pickerKbRender()
-  }
-
-  // Cancel PICKING (Esc): restore the input to its pre-picker state.
-  function _pickerKbCancel() {
-    if (!pickerKb) return
-    const { target, savedValue, savedCaret } = pickerKb
-    target.value = savedValue
-    target.setSelectionRange(savedCaret, savedCaret)
-    target.dispatchEvent(new Event('input', { bubbles: true }))
-    pickerKb = null
-    pickerRect = null
-    render()
-  }
-
-  // Exit PICKING but keep the inserted ref (user typed an operator / digit).
-  function _pickerKbCommit() {
-    pickerKb = null
-    // Leave pickerRect visible — picker.kind = 'cell' so anchor data is the
-    // last picked rect. It'll clear on next selection move / commit / cancel.
   }
 
   // True unless the host marks any cell in the rect protected. Guards the two
@@ -769,7 +547,7 @@ export function createGrid(canvas, { onSelect, onCommit, onInput, onCancel, getF
     const id  = cellId(S.anchor.r, S.anchor.c)
     const val = overlay.getValue()
     overlay.hide()
-    _clearPickerHighlight()
+    pick.clear()
     onCommit?.(id, val)
   }
 
@@ -826,7 +604,7 @@ export function createGrid(canvas, { onSelect, onCommit, onInput, onCancel, getF
     const ac = autoCloseKey(e.key, overlay.el.value, overlay.el.selectionStart, overlay.el.selectionEnd)
     if (ac) {
       e.preventDefault()
-      if (pickerKb) _pickerKbCommit()   // finalize an in-progress keyboard pick first
+      if (pick.isKeyPicking()) pick.keyCommit()   // finalize an in-progress keyboard pick first
       overlay.el.value = ac.value
       overlay.el.setSelectionRange(ac.caret, ac.caret)
       overlay.el.dispatchEvent(new Event('input', { bubbles: true }))
@@ -835,8 +613,8 @@ export function createGrid(canvas, { onSelect, onCommit, onInput, onCancel, getF
     // Commit any active cell-ref pick when the user types a printable char
     // (e.g. '+' after picking C1) so the next arrow key starts a fresh ref
     // instead of replacing the one already inserted.
-    if (pickerKb && e.key.length === 1 && !e.metaKey && !e.ctrlKey) {
-      _pickerKbCommit()
+    if (pick.isKeyPicking() && e.key.length === 1 && !e.metaKey && !e.ctrlKey) {
+      pick.keyCommit()
     }
     // In 'enter' mode, arrow keys commit the current value and move the
     // selection one cell in that direction — matching Excel / Google Sheets.
@@ -846,20 +624,19 @@ export function createGrid(canvas, { onSelect, onCommit, onInput, onCancel, getF
       const [dr, dc] = dirs[e.key]
       const mod = e.ctrlKey || e.metaKey
       // If picker is already active, move it.
-      if (pickerKb) {
+      if (pick.isKeyPicking()) {
         e.preventDefault()
-        _pickerKbMove(dr, dc, e.shiftKey, mod)
+        pick.keyMove(dr, dc, e.shiftKey, mod)
         return
       }
       // Inside a formula (value starts with `=`) arrows always drive the
-      // picker — even between args, after a comma, etc. _isRefPosition's
-      // finer "REPLACE vs INSERT" check happens inside _pickerKbStart via
-      // _refReplaceStart; gating the picker on it here was eating the
-      // second-range pick in =VLOOKUP(..., …) and dumping the user to the
-      // adjacent cell instead.
+      // picker — even between args, after a comma, etc. Whether the pick
+      // replaces a partial ref or inserts a new one is decided in keyStart;
+      // gating the picker here used to eat the second-range pick in
+      // =VLOOKUP(..., …) and dump the user to the adjacent cell instead.
       if (overlay.getValue().startsWith('=')) {
         e.preventDefault()
-        _pickerKbStart(overlay.el, dr, dc, e.shiftKey)
+        pick.keyStart(overlay.el, dr, dc, e.shiftKey)
         return
       }
       // Not a formula — arrow commits and moves like Excel / Google Sheets.
@@ -871,7 +648,7 @@ export function createGrid(canvas, { onSelect, onCommit, onInput, onCancel, getF
     }
     if (e.key === 'Enter') {
       e.preventDefault()
-      if (pickerKb) _pickerKbCommit()
+      if (pick.isKeyPicking()) pick.keyCommit()
       // Cmd/Ctrl/Alt+Enter: newline inside the cell (Google Sheets), not commit.
       if (e.metaKey || e.ctrlKey || e.altKey) {
         const { selectionStart: s0, selectionEnd: s1, value } = overlay.el
@@ -887,17 +664,17 @@ export function createGrid(canvas, { onSelect, onCommit, onInput, onCancel, getF
       canvas.focus()
     } else if (e.key === 'Tab') {
       e.preventDefault()
-      if (pickerKb) _pickerKbCommit()
+      if (pick.isKeyPicking()) pick.keyCommit()
       if (_tabAnchorCol === null) _tabAnchorCol = S.anchor.c
       _commitAndHide()
       moveSel(S.anchor.r, e.shiftKey ? S.anchor.c - 1 : S.anchor.c + 1)
       canvas.focus()
     } else if (e.key === 'Escape') {
       _acHide()
-      if (pickerKb) { _pickerKbCancel(); return }  // Esc while picking: cancel pick, stay editing
+      if (pick.isKeyPicking()) { pick.keyCancel(); return }  // Esc while picking: cancel pick, stay editing
       editing = false
       overlay.hide()
-      _clearPickerHighlight()
+      pick.clear()
       render()
       canvas.focus()
       onCancel?.(cellId(S.anchor.r, S.anchor.c))
@@ -1041,66 +818,22 @@ export function createGrid(canvas, { onSelect, onCommit, onInput, onCancel, getF
     // VLOOKUP-mid-typing crash: previously a click on a column/row header
     // would commit the partial formula → parser throws. Now those clicks
     // insert a column/row reference instead.
-    const pickInput = _pickTarget()
+    const pickInput = pick.target()
     if (pickInput) {
       e.preventDefault()
       const hit = hits.at(e.clientX, e.clientY, rect)
-      // Headers and cells insert a reference; everything else is a no-op.
-      if (hit.kind === 'colHeader') {
-        const colHit = hit.col
-        // Full-column reference (`A:A`, with optional `Sheet1!` prefix when foreign).
-        const ref = `${_sheetPrefixIfForeign()}${colLabel(colHit)}:${colLabel(colHit)}`
-        _writeRef(pickInput, ref, _refReplaceStart(pickInput))
-        picker     = { anchorR: 0, anchorC: colHit, target: pickInput, kind: 'col' }
-        pickerRect = { r0: 0, c0: colHit, r1: TOTAL_ROWS - 1, c1: colHit }
-        render()
-        return
-      }
-      if (hit.kind === 'rowHeader') {
-        const rowHit = hit.row
-        // Full-row reference (`1:1`).
-        const ref = `${_sheetPrefixIfForeign()}${rowHit + 1}:${rowHit + 1}`
-        _writeRef(pickInput, ref, _refReplaceStart(pickInput))
-        picker     = { anchorR: rowHit, anchorC: 0, target: pickInput, kind: 'row' }
-        pickerRect = { r0: rowHit, c0: 0, r1: rowHit, c1: TOTAL_COLS - 1 }
-        render()
-        return
-      }
-      // Resize edges, the fill handle and the corner do nothing while picking.
+      // Headers and cells insert a reference; resize edges, the fill handle
+      // and the corner do nothing while picking.
+      if (hit.kind === 'colHeader') { pick.pickColumn(pickInput, hit.col); return }
+      if (hit.kind === 'rowHeader') { pick.pickRow(pickInput, hit.row); return }
       if (hit.kind !== 'cell') return
-      const h = hit
       // No self-reference — clicking the cell being edited is a no-op, but
       // only when we're on the editing-home sheet (clicking the same screen
       // cell on a *different* sheet is a legitimate cross-sheet reference).
-      if (editing && h.r === S.anchor.r && h.c === S.anchor.c && !_crossSheetName()) return
+      if (editing && hit.r === S.anchor.r && hit.c === S.anchor.c && !_crossSheetName()) return
       // Slave cells redirect to their merge master.
-      let tr = h.r, tc = h.c
-      if (getMasterId) {
-        const mid = getMasterId(cellId(h.r, h.c))
-        if (mid) { const p = parseCellId(mid); if (p) { tr = p.row; tc = p.col } }
-      }
-      // Range picking by click (Google Sheets style). A plain click writes a
-      // single-cell ref and remembers it as the anchor; the NEXT click extends
-      // from that anchor to here → A1:A3, no drag or modifier needed. The
-      // anchor only "continues" while the last-picked ref still abuts the caret
-      // (the user hasn't typed since) — so typing an operator/comma, or picking
-      // in a new argument, resets to a fresh ref. Shift+click always extends.
-      // pickMouseAnchor outlives `picker` (which mouseup clears).
-      const rStart   = _refReplaceStart(pickInput)
-      const abutting = pickInput.value.slice(rStart, pickInput.selectionStart)
-      const lastRef  = (pickerRect && !_sugActive)
-        ? _refForRange(pickerRect.r0, pickerRect.c0, pickerRect.r1, pickerRect.c1, _crossSheetName())
-        : null
-      const continuing = !!pickMouseAnchor && lastRef !== null && abutting === lastRef
-      const anchor = ((e.shiftKey || continuing) && pickMouseAnchor) ? pickMouseAnchor : { r: tr, c: tc }
-      const r0 = Math.min(anchor.r, tr), r1 = Math.max(anchor.r, tr)
-      const c0 = Math.min(anchor.c, tc), c1 = Math.max(anchor.c, tc)
-      _writeRef(pickInput, _refForRange(r0, c0, r1, c1, _crossSheetName()), rStart)
-      picker     = { anchorR: anchor.r, anchorC: anchor.c, target: pickInput, kind: 'cell' }
-      pickerRect = { r0, c0, r1, c1 }
-      pickMouseAnchor = anchor   // keep the origin so the next click re-extends
-      pickerKb   = null   // mouse-pick supersedes any keyboard pick state
-      render()
+      const m = _resolveMaster(hit.r, hit.c)
+      pick.pickCell(pickInput, m.r, m.c, e.shiftKey)
       return
     }
 
@@ -1341,15 +1074,9 @@ export function createGrid(canvas, { onSelect, onCommit, onInput, onCancel, getF
       if (h) extendSel(h.r, h.c)
       return
     }
-    if (picker) {
+    if (pick.isDragging()) {
       const h = geo.hitTest(e.clientX, e.clientY, rect)
-      if (h) {
-        const r0 = Math.min(picker.anchorR, h.r), r1 = Math.max(picker.anchorR, h.r)
-        const c0 = Math.min(picker.anchorC, h.c), c1 = Math.max(picker.anchorC, h.c)
-        _writeRef(picker.target, _refForRange(r0, c0, r1, c1, _crossSheetName()), _refReplaceStart(picker.target))
-        pickerRect = { r0, c0, r1, c1 }
-        render()
-      }
+      if (h) pick.dragTo(h.r, h.c)
       return
     }
     if (!dragging) return
@@ -1368,12 +1095,8 @@ export function createGrid(canvas, { onSelect, onCommit, onInput, onCancel, getF
       if (hasTarget) onFill?.(src, total, { withModifier: e.metaKey || e.ctrlKey })
       filling = null
     }
-    if (picker) {
-      // Return focus to whichever input fed the picker so the user keeps typing.
-      const t = picker.target
-      picker = null
-      t?.focus?.()
-    }
+    // Return focus to whichever input fed the picker so the user keeps typing.
+    pick.endDrag()
     // A click that stayed on its origin list cell (no range-drag) opens the
     // dropdown. A drag past a few px is a selection, so it cancels the open.
     if (_pendingListOpen) {
@@ -1444,7 +1167,7 @@ export function createGrid(canvas, { onSelect, onCommit, onInput, onCancel, getF
   // overlay events here to avoid double-handling.
   function _onDocPickerKey(e) {
     if (e.target === overlay.el) return          // overlay is self-contained
-    const target = _pickTarget()
+    const target = pick.target()
     if (!target) return
     // Home/End/Shift+Home/Shift+End always move text caret. Never picker.
     if (e.key === 'Home' || e.key === 'End') return
@@ -1454,37 +1177,36 @@ export function createGrid(canvas, { onSelect, onCommit, onInput, onCancel, getF
     const mod = e.ctrlKey || e.metaKey
 
     // PICKING mode — every keydown is meaningful.
-    if (pickerKb && pickerKb.target === target) {
+    if (pick.isKeyPicking(target)) {
       if (dir) {
         e.preventDefault()
         e.stopPropagation()
-        _pickerKbMove(dir[0], dir[1], e.shiftKey, mod)
+        pick.keyMove(dir[0], dir[1], e.shiftKey, mod)
         return
       }
       if (e.key === 'Escape') {
         e.preventDefault()
         e.stopPropagation()
-        _pickerKbCancel()
+        pick.keyCancel()
         return                                       // EDITING continues
       }
       if (e.key === 'Enter' || e.key === 'Tab') {
-        _pickerKbCommit()
+        pick.keyCommit()
         return                                       // fall through to commit
       }
       // Any other key (digit, letter, operator, comma, close-paren, etc.):
       // exit PICKING and let the keystroke reach the input naturally.
-      _pickerKbCommit()
+      pick.keyCommit()
       return
     }
 
-    // EDITING mode — any arrow in a `=…` input drives the picker. The tighter
-    // _isRefPosition check is delegated to _pickerKbStart (it picks REPLACE
-    // vs INSERT via _refReplaceStart); gating it here was breaking second-
-    // range picks in =VLOOKUP(..., …).
+    // EDITING mode — any arrow in a `=…` input drives the picker. keyStart
+    // decides REPLACE vs INSERT; gating it here was breaking second-range
+    // picks in =VLOOKUP(..., …).
     if (dir) {
       e.preventDefault()
       e.stopPropagation()
-      _pickerKbStart(target, dir[0], dir[1], e.shiftKey)
+      pick.keyStart(target, dir[0], dir[1], e.shiftKey)
       return
     }
     // Otherwise let the native input handle the key (caret moves in text).
